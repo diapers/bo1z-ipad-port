@@ -70,7 +70,7 @@ pub struct App {
     #[cfg(target_os = "ios")]
     menu_overlay: Option<crate::menu::Overlay>,
     /// Desktop loading cinematic: a child window over the game, and its player.
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(windows)]
     load_video: Option<(Window, crate::loadvideo::LoadVideo)>,
     /// The active event loop, valid only while a handler runs (window creation needs it).
     event_loop: Option<*const ActiveEventLoop>,
@@ -99,7 +99,7 @@ impl App {
             cursor: (0.0, 0.0),
             #[cfg(target_os = "ios")]
             menu_overlay: None,
-            #[cfg(not(target_os = "ios"))]
+            #[cfg(windows)]
             load_video: None,
             event_loop: None,
 
@@ -173,7 +173,10 @@ impl App {
                 gl_ctx::swap();
             }
             gl_ctx::release_current();
-            self.load_video = self.start_video();
+            #[cfg(windows)]
+            {
+                self.load_video = self.start_video();
+            }
             if let Some(w) = self.window.as_ref() {
                 w.set_title(&format!("BO1Z - {}", m.name));
             }
@@ -185,7 +188,7 @@ impl App {
     }
 
     /// Desktop: the cinematic in a borderless child window covering the game window.
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(windows)]
     fn start_video(&mut self) -> Option<(Window, crate::loadvideo::LoadVideo)> {
         let video = crate::loading::video()?;
         let el = self.event_loop.as_ref()?;
@@ -252,7 +255,7 @@ impl App {
 
     /// Remove the loading cinematic, if it is still up.
     fn end_video(&mut self) {
-        #[cfg(not(target_os = "ios"))]
+        #[cfg(windows)]
         if self.load_video.take().is_some() {
             // Dropping stops ffmpeg and destroys the child window.
             if let Some(w) = self.window.as_ref() {
@@ -266,10 +269,12 @@ impl App {
     }
 
     fn video_running(&self) -> bool {
-        #[cfg(not(target_os = "ios"))]
+        #[cfg(windows)]
         return self.load_video.is_some();
         #[cfg(target_os = "ios")]
         return self.video_overlay.is_some();
+        #[cfg(not(any(windows, target_os = "ios")))]
+        return false;
     }
 
     /// The map has loaded and the loading screen asks the player to start.
@@ -319,7 +324,7 @@ impl App {
 
     fn tick(&mut self) {
         // The loading cinematic: removed when it ends or once the game has started.
-        #[cfg(not(target_os = "ios"))]
+        #[cfg(windows)]
         let ended = match self.load_video.as_mut() {
             Some((child, v)) => {
                 if let Some(p) = self.window.as_ref().map(|w| w.inner_size()) {
@@ -336,6 +341,8 @@ impl App {
             Some(o) => o.tick() || crate::loading::is_released(),
             None => false,
         };
+        #[cfg(not(any(windows, target_os = "ios")))]
+        let ended = false;
         if ended {
             log::info("loading video finished");
             self.end_video();

@@ -13,7 +13,7 @@ mod gl_ctx;
 mod imports;
 mod input;
 mod loading;
-#[cfg(not(target_os = "ios"))]
+#[cfg(windows)]
 mod loadvideo;
 mod log;
 mod maps;
