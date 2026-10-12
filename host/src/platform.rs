@@ -73,7 +73,14 @@ impl App {
         self.window = Some(window);
         self.pads = Some(Pads::new());
         log::info(&format!("window + EGL ready, surface {:?}", gl_ctx::surface_size()));
-        if let Some(boot) = self.boot.take() {
+        if let Some(mut boot) = self.boot.take() {
+            // Render at the drawing-buffer size (engine.js passes the canvas size the same way).
+            let (w, h) = gl_ctx::surface_size();
+            if w > 0 && h > 0 {
+                if let Some(i) = boot.args.iter().position(|a| a == "r_customMode") {
+                    boot.args[i + 1] = format!("{w}x{h}");
+                }
+            }
             rt::start_browser_main(boot);
         }
         self.booted = true;
@@ -268,7 +275,10 @@ fn native_window(w: &Window) -> anyhow::Result<*mut std::ffi::c_void> {
     };
     unsafe {
         let view: &UIView = h.ui_view.cast::<UIView>().as_ref();
+        // 1x rendering: Retina (2x) would quadruple the pixels this engine has to shade.
+        view.setContentScaleFactor(1.0);
         let layer = view.layer();
+        layer.setContentsScale(1.0);
         Ok(Retained::into_raw(layer) as *mut std::ffi::c_void)
     }
 }
