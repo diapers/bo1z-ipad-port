@@ -44,7 +44,9 @@ game packs bundled inside. Keep this file current; it is the hand-off document.
 | iOS packaging + ANGLE-for-iOS CI | ios/, .github/workflows/ios-build.yml | written by agent, untested (see ios/README.md, ios/IOS_RISKS.md) |
 | browser-main role on its own 32 MiB-stack thread (UI thread only forwards input) | rt.rs/platform.rs | DONE |
 | git repo initialised, first commit cf42c34 | — | DONE (no remote yet) |
-| build IPA in CI + test on iPad | — | NEXT: needs a public GitHub repo URL from the user |
+| GitHub repo diapers/bo1z-ipad-port; ios-build CI green | — | DONE 2026-10-12 |
+| IPA build 1 (fb10f7b) | build/BO1Z-five.ipa | crashed on open on iPad (no log collected yet) |
+| IPA build 2 (3fc3037): log first, compile off UI thread, JIT check | build/BO1Z-five.ipa | waiting for user test + Documents/bo1z.log |
 
 ## Toolchain on this PC
 Rust (rustup, stable MSVC) + VS 2022 C++ workload installed 2026-10-11.
