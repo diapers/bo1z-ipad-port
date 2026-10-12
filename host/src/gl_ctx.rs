@@ -54,8 +54,22 @@ pub fn create(lib: &Path, window: *mut std::ffi::c_void) -> Result<()> {
     ];
     let config = egl.choose_first_config(display, &attrs)?.ok_or_else(|| anyhow!("no RGBA8/D24S8 ES3 EGL config"))?;
     let surface = unsafe { egl.create_window_surface(display, config, window as egl::NativeWindowType, None)? };
-    let ctx_attrs = [egl::CONTEXT_MAJOR_VERSION, 3, egl::CONTEXT_MINOR_VERSION, 0, egl::NONE];
+    // WebGL zero-fills every new texture/buffer/renderbuffer; native GLES leaves them
+    // undefined. The engine relies on the WebGL behaviour (it allocates full mip chains
+    // and streams levels in later), and on Metal the undefined memory is garbage that
+    // samples as blocky BC-decoded noise. ANGLE's robust resource init restores WebGL's rule.
+    const ROBUST_RESOURCE_INITIALIZATION_ANGLE: egl::Int = 0x3453;
+    let robust_init = egl
+        .query_string(Some(display), egl::EXTENSIONS)
+        .map(|s| s.to_string_lossy().split(' ').any(|e| e == "EGL_ANGLE_robust_resource_initialization"))
+        .unwrap_or(false);
+    let mut ctx_attrs = vec![egl::CONTEXT_MAJOR_VERSION, 3, egl::CONTEXT_MINOR_VERSION, 0];
+    if robust_init {
+        ctx_attrs.extend([ROBUST_RESOURCE_INITIALIZATION_ANGLE, egl::TRUE as egl::Int]);
+    }
+    ctx_attrs.push(egl::NONE);
     let context = egl.create_context(display, config, None, &ctx_attrs)?;
+    log::info(&format!("robust resource initialization: {robust_init}"));
     // Paint the window black right away: the engine draws nothing until its core
     // fastfiles are loaded, and an untouched surface shows as white.
     egl.make_current(display, Some(surface), Some(surface), Some(context))?;
@@ -85,7 +99,9 @@ fn ctx() -> Result<&'static Ctx> {
 pub fn make_current() -> Result<bool> {
     let c = ctx()?;
     c.egl.make_current(c.display, Some(c.surface), Some(c.surface), Some(c.context))?;
-    c.egl.swap_interval(c.display, 1)?;
+    // No vsync wait: a frame that misses a vblank by a little would otherwise wait a whole
+    // extra refresh (60 -> 30 fps judder). The engine paces itself with com_maxfps.
+    c.egl.swap_interval(c.display, 0)?;
     if LOADED.swap(true, Ordering::AcqRel) {
         return Ok(false);
     }
@@ -130,11 +146,25 @@ pub fn set_requested_size(w: i32, h: i32) {
 
 static FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Debug: BO1Z_SHOT="600,1200" saves those presented frames as BMP into the data dir.
+static SHOT_T: std::sync::Mutex<Option<(std::time::Instant, Vec<f32>)>> = std::sync::Mutex::new(None);
+
+/// Debug: BO1Z_SHOT="600,1200" saves those presented frames as BMP into the data dir;
+/// BO1Z_SHOT_AT="45,60.5" does the same at those seconds after the first frame.
 pub fn before_present(data_dir: &Path) {
     let n = FRAME.fetch_add(1, Ordering::Relaxed) + 1;
-    let Ok(spec) = std::env::var("BO1Z_SHOT") else { return };
-    if !spec.split(',').any(|s| s.trim().parse::<u64>().ok() == Some(n)) {
+    let by_frame = std::env::var("BO1Z_SHOT").is_ok_and(|spec| spec.split(',').any(|s| s.trim().parse::<u64>().ok() == Some(n)));
+    let by_time = {
+        let mut g = SHOT_T.lock().unwrap();
+        let (t0, due) = g.get_or_insert_with(|| {
+            let list = std::env::var("BO1Z_SHOT_AT").unwrap_or_default();
+            (std::time::Instant::now(), list.split(',').filter_map(|s| s.trim().parse().ok()).collect())
+        });
+        let now = t0.elapsed().as_secs_f32();
+        let before = due.len();
+        due.retain(|&t| t > now);
+        due.len() != before
+    };
+    if !by_frame && !by_time {
         return;
     }
     let (w, h) = surface_size();

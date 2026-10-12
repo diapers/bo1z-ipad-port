@@ -11,7 +11,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::PhysicalKey;
 use winit::window::{CursorGrabMode, Window, WindowId};
 
-use crate::input::{self, Mapper, Pads};
+use crate::input::{self, FakePad, Mapper, Pads};
 use crate::{gl_ctx, log, rt};
 
 
@@ -33,11 +33,13 @@ pub struct App {
     window: Option<Window>,
     booted: bool,
     pads: Option<Pads>,
+    fake_pad: Option<FakePad>,
     mapper: Mapper,
-    last_tick: Instant,
     grabbed: bool,
     started: Instant,
     autoplay: Option<f32>,
+    #[cfg(target_os = "ios")]
+    loading_overlay: Option<crate::loading::Overlay>,
 }
 
 impl App {
@@ -48,12 +50,14 @@ impl App {
             window: None,
             booted: false,
             pads: None,
+            fake_pad: FakePad::from_env(),
             mapper: Mapper::new(),
-            last_tick: Instant::now(),
             grabbed: false,
             started: Instant::now(),
             // Debug: BO1Z_AUTOPLAY=<seconds> releases the intro gate without input.
             autoplay: std::env::var("BO1Z_AUTOPLAY").ok().and_then(|s| s.parse().ok()),
+            #[cfg(target_os = "ios")]
+            loading_overlay: None,
         }
     }
 
@@ -70,6 +74,10 @@ impl App {
         let window = el.create_window(attrs)?;
         let native = native_window(&window)?;
         gl_ctx::create(&self.egl_lib, native)?;
+        #[cfg(target_os = "ios")]
+        {
+            self.loading_overlay = game_view(&window).and_then(|v| crate::loading::Overlay::new(&v));
+        }
         self.window = Some(window);
         self.pads = Some(Pads::new());
         log::info(&format!("window + EGL ready, surface {:?}", gl_ctx::surface_size()));
@@ -111,9 +119,10 @@ impl App {
     }
 
     fn tick(&mut self) {
-        let now = Instant::now();
-        let dt = (now - self.last_tick).as_secs_f32().min(0.1);
-        self.last_tick = now;
+        #[cfg(target_os = "ios")]
+        if self.loading_overlay.as_ref().is_some_and(|o| !o.update()) {
+            self.loading_overlay = None;
+        }
         if !self.booted || !rt::ready() {
             return;
         }
@@ -125,14 +134,13 @@ impl App {
                 rt::post_input(input::LOCK, 1, 0);
             }
         }
-        let Some(pads) = self.pads.as_mut() else { return };
-        let pad = pads.poll();
-        if !pad.connected {
-            return;
-        }
+        let pad = match (self.fake_pad.as_mut(), self.pads.as_mut()) {
+            (Some(f), _) => f.poll(self.started.elapsed().as_secs_f32()),
+            (None, Some(p)) => p.poll(),
+            (None, None) => return,
+        };
         let menu = rt::ui_state() & 1 != 0;
-        let size = gl_ctx::surface_size();
-        for ev in self.mapper.update(&pad, dt, menu, size) {
+        for ev in self.mapper.update(&pad, menu) {
             rt::post_input(ev.0, ev.1, ev.2);
         }
     }
@@ -262,6 +270,15 @@ fn native_window(w: &Window) -> anyhow::Result<*mut std::ffi::c_void> {
         RawWindowHandle::Win32(h) => Ok(h.hwnd.get() as *mut _),
         other => anyhow::bail!("unsupported window handle {other:?}"),
     }
+}
+
+/// The winit root view the game renders into (the loading bar is added on top of it).
+#[cfg(target_os = "ios")]
+fn game_view(w: &Window) -> Option<objc2::rc::Retained<objc2_ui_kit::UIView>> {
+    use objc2::Message;
+    let RawWindowHandle::UiKit(h) = w.window_handle().ok()?.as_raw() else { return None };
+    let view: &objc2_ui_kit::UIView = unsafe { h.ui_view.cast::<objc2_ui_kit::UIView>().as_ref() };
+    Some(view.retain())
 }
 
 /// ANGLE's Metal backend accepts any CALayer: it adds a CAMetalLayer sublayer and keeps

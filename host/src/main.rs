@@ -12,6 +12,7 @@ mod gl;
 mod gl_ctx;
 mod imports;
 mod input;
+mod loading;
 mod log;
 mod mem;
 mod platform;
@@ -116,7 +117,7 @@ fn engine_args(o: &Options, zone: &str, opfs_root: &str) -> Vec<String> {
         "+set", "r_aaSamples", "1",
         "+set", "r_clear", "0",
         "+set", "r_vsync", "0",
-        "+set", "com_maxfps", "0",
+        "+set", "com_maxfps", "60",
         "+set", "snd_softwaremixer", "1",
         "+set", "snd_softwarewav", "0",
     ]
@@ -126,7 +127,7 @@ fn engine_args(o: &Options, zone: &str, opfs_root: &str) -> Vec<String> {
     a.extend(["+set".into(), "snd_softwaretable".into(), format!("{opfs_root}/web/sound")]);
     a.extend(["+set", "r_smp_backend", "0", "+set", "sensitivity", "5", "+set", "snd_menu_master", "0.8"].map(String::from));
     a.extend(["+set".into(), "r_customMode".into(), format!("{}x{}", o.width, o.height)]);
-    a.extend(input::extra_binds());
+    a.extend(input::startup_args());
     a.extend(["+devmap".into(), zone.into()]);
     a
 }
@@ -191,6 +192,7 @@ fn run() -> Result<()> {
     let o = options()?;
     let (slug, zone) = MAPS.iter().find(|m| m.0 == o.map).copied().ok_or_else(|| anyhow!("unknown map {}", o.map))?;
     log::info(&format!("map {slug} ({zone}); packs {}; wasm {}", o.game.display(), o.wasm.display()));
+    loading::init(&o.game.join(slug), zone);
 
     // maps.js: Five lives in OPFS "pack", every other map in "pack-<slug>".
     let opfs_dir = if slug == "five" { "pack".to_string() } else { format!("pack-{slug}") };

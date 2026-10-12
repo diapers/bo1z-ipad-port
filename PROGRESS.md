@@ -99,3 +99,24 @@ Note: iOS only supports Xbox One S / Series pads over Bluetooth (not Xbox 360 pa
 - Device test of build 3: AOT load OK (6.4 ms), ANGLE Metal on M1 OK, all WebGL2 exts OK; engine quit:
   "Could not find zone .../zone/english/code_pre_gfx_mp.ff" -- engine asks zone/common, pack has zone/Common.
 - Build 4 (2081507, run 38222917146): case-insensitive fs lookup + r_customMode = surface size + 1x scale on iOS.
+
+## 2026-10-12: build 4 device test -> build 5
+Build 4 runs on the iPad (Five playable). Issues from the screen recording + user notes, and fixes:
+- Blocky black/white texture corruption: native GLES leaves new textures undefined (WebGL zero-fills);
+  on Metal that is garbage BC blocks. Fix: EGL_ROBUST_RESOURCE_INITIALIZATION_ANGLE (gl_ctx.rs).
+- Controller was keyboard emulation (keyboard hints, menus stuck). The engine still has BO1's gamepad
+  code; only the XInput poller is missing. input.rs now writes pad 0's GamePad struct (147054240,
+  124 B: +0 enabled, +2 digitals (XInput bits), +4 last, +8 LT/RT, +24 LX LY RX RY) and the physical
+  axes (13382032, i32 x6 /65535: RX RY LX LY RT LT), sends BUTTON_*/DPAD_* keys (A=1 B=2 X=3 Y=4
+  LB=5 RB=6 Start=14 Back=15 L3=16 R3=17 LT=18 RT=19 Up..Right=20..23), and sets gpad_enabled /
+  gpad_present (dvar ptrs 147054220/147054224, bool at +24) only while a pad is connected.
+  `+exec default_controller.cfg` loads BO1's layout. BrowserFrame has a gamepad menu cursor.
+  Only Xbox glyphs exist in the PC data; PadKind detects PlayStation for later.
+- Choppiness: swap interval 0 + com_maxfps 60 (no 60/30 vsync judder); emscripten setImmediate
+  main loops (mode 2) spun a whole core -> 1 ms minimum. Log prints "frames: fps/avg/max/hitches".
+- Black boot screen: loading.rs. Progress = bytes read / pack .ff bytes, done at
+  "KISAK_STARTUP leave=<zone>". iOS: UIKit views over the game view (updated on the UI thread,
+  since the engine barely presents while loading); desktop: scissor clears before present.
+- Debug: BO1Z_FAKEPAD="t:Btn;t:ly=1;..." scripted pad, BO1Z_SHOT_AT="seconds" screenshots.
+- PC check: in-game 51-58 fps steady (debug JIT build), keyboard hints without a pad.
+  iOS-only code (UIKit overlay, GameController productCategory) verified against crate sources only.

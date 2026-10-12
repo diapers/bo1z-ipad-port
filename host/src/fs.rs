@@ -455,7 +455,10 @@ pub fn register(l: &mut Linker<Ctx>) -> Result<()> {
         let st = STATE.lock();
         let Some(a) = st.access.get(id) else { return EIO_JS };
         match read_full(&a.file, mem::bytes_mut(buf as u32, len as usize), pos as u64) {
-            Ok(n) => n as i32,
+            Ok(n) => {
+                crate::loading::add_read(n);
+                n as i32
+            }
             Err(_) => EIO_JS,
         }
     })?;
@@ -528,7 +531,10 @@ pub fn register(l: &mut Linker<Ctx>) -> Result<()> {
                     Some(b) => {
                         let pos = pos as u64;
                         let len = (len as u64).min(b.size.saturating_sub(pos)) as usize;
-                        read_full(&b.file, mem::bytes_mut(buf as u32, len), pos).map_or(EIO_JS, |n| n as i32)
+                        read_full(&b.file, mem::bytes_mut(buf as u32, len), pos).map_or(EIO_JS, |n| {
+                            crate::loading::add_read(n);
+                            n as i32
+                        })
                     }
                 }
             };

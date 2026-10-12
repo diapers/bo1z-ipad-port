@@ -597,13 +597,14 @@ fn maybe_exit(store: &mut Store<Ctx>) -> bool {
 fn event_loop(store: &mut Store<Ctx>) {
     let inbox = store.data().inbox.clone();
     let mut next_tick = Instant::now();
+    let mut stats = FrameStats::default();
     loop {
         if rt().shutting_down.load(Ordering::Relaxed) {
             return;
         }
         let timeout = match store.data().main_loop {
             None => None,
-            Some(ml) if ml.mode == 0 => Some(next_tick.saturating_duration_since(Instant::now())),
+            Some(ml) if ml.mode != 1 => Some(next_tick.saturating_duration_since(Instant::now())),
             Some(_) => Some(Duration::ZERO),
         };
         for m in inbox.take(timeout) {
@@ -619,10 +620,13 @@ fn event_loop(store: &mut Store<Ctx>) {
             }
         }
         let Some(ml) = store.data().main_loop else { continue };
-        if ml.mode == 0 && Instant::now() < next_tick {
+        if ml.mode != 1 && Instant::now() < next_tick {
             continue;
         }
         let tick_start = Instant::now();
+        if store.data().gl_current {
+            stats.frame(tick_start);
+        }
         match table_func::<i32, ()>(&mut *store, ml.func) {
             Ok(f) => {
                 settle(f.call(&mut *store, ml.arg as i32), "main loop");
@@ -634,6 +638,11 @@ fn event_loop(store: &mut Store<Ctx>) {
         }
         // OffscreenCanvas commit: the frame presents when the worker yields.
         if store.data().gl_current {
+            #[cfg(not(target_os = "ios"))]
+            {
+                let (sw, sh) = gl_ctx::surface_size();
+                crate::loading::draw(sw, sh);
+            }
             if let Some(dir) = rt().paths.opfs_root.parent() {
                 gl_ctx::before_present(dir);
             }
@@ -643,6 +652,10 @@ fn event_loop(store: &mut Store<Ctx>) {
         }
         if ml.mode == 0 {
             next_tick = tick_start + Duration::from_millis(ml.value.max(0) as u64);
+        } else if ml.mode == 2 {
+            // setImmediate: the browser runs this back-to-back, but natively that spins a
+            // whole core (thermal throttling on iPad). 1 ms keeps ~1000 iterations/s.
+            next_tick = tick_start + Duration::from_millis(1);
         }
         if maybe_exit(store) {
             return;
@@ -672,4 +685,33 @@ pub fn thread_cleanup(cx: &mut Caller<'_, Ctx>, thread: u32) -> Result<()> {
         rt().main_inbox.push(Msg::Cleanup(thread));
     }
     Ok(())
+}
+
+/// Logs frame pacing every 5 s: fps, average and worst frame-to-frame time, and how many
+/// frames took longer than 1.5x the average (the hitches that read as choppiness).
+#[derive(Default)]
+struct FrameStats {
+    last: Option<Instant>,
+    window_start: Option<Instant>,
+    times: Vec<f32>,
+}
+
+impl FrameStats {
+    fn frame(&mut self, now: Instant) {
+        if let Some(last) = self.last {
+            self.times.push((now - last).as_secs_f32() * 1000.0);
+        }
+        self.last = Some(now);
+        let start = *self.window_start.get_or_insert(now);
+        let span = (now - start).as_secs_f32();
+        if span >= 5.0 && !self.times.is_empty() {
+            let n = self.times.len() as f32;
+            let avg = self.times.iter().sum::<f32>() / n;
+            let max = self.times.iter().cloned().fold(0.0, f32::max);
+            let hitches = self.times.iter().filter(|&&t| t > avg * 1.5).count();
+            log::info(&format!("frames: {:.1} fps, avg {avg:.1} ms, max {max:.1} ms, {hitches} hitches", n / span));
+            self.times.clear();
+            self.window_start = Some(now);
+        }
+    }
 }

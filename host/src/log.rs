@@ -43,6 +43,7 @@ pub fn error(msg: &str) {
 
 /// Engine stdout/stderr (Module.print / printErr).
 pub fn engine(msg: &str, err: bool) {
+    crate::loading::engine_line(msg);
     emit(if err { "eng! " } else { "eng  " }, msg.trim_end_matches('\n'));
 }
 

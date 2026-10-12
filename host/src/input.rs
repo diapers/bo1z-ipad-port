@@ -1,14 +1,17 @@
-//! Xbox 360/One controller -> the engine's keyboard/mouse input (KB_Input).
+//! Controller -> the engine's own gamepad support.
 //!
-//! The web build only accepts key/mouse events, so the pad drives the engine's built-in
-//! PC binds (w/a/s/d, f use, r reload, g frag, 4 tactical, v melee, ...). Two spare keys
-//! are bound at startup to the console commands +usereload (X) and +speed_throw
-//! (hold-to-ADS on LT); see `extra_binds`.
+//! The engine still carries BO1's console gamepad code (GPad_*, CL_GamepadAxisValue,
+//! bindaxis, BUTTON_* keys, button-glyph hints, the BrowserFrame menu cursor); only the
+//! XInput poller that fed it was left out of the web build. The host takes its place:
+//! every tick it writes pad 0's GamePad struct and the six physical axes, and sends
+//! BUTTON_*/DPAD_* key events so the binds from default_controller.cfg apply.
 //!
-//! In menus (KB_UIState() & 1) the pointer is unlocked and the stick drives an absolute
-//! cursor, as with the browser's unlocked mouse; A clicks, B backs out.
+//! Addresses are from KisakBlack-native.wasm (see GPad_GetStick, GPad_GetButton,
+//! CL_GamepadAxisValue) and must be re-derived if the engine binary changes.
 
 use std::collections::HashSet;
+
+use crate::mem;
 
 /// KB_Input kinds (engine.js).
 pub const KEY: i32 = 0;
@@ -17,30 +20,76 @@ pub const LOCK: i32 = 3;
 pub const CURSOR: i32 = 4;
 pub const INTRO: i32 = 7;
 
+/// Engine key numbers (keynames table).
 pub mod key {
-    pub const TAB: i32 = 9;
-    pub const ENTER: i32 = 13;
-    pub const ESC: i32 = 27;
-    pub const SPACE: i32 = 32;
-    pub const UP: i32 = 154;
-    pub const DOWN: i32 = 155;
-    pub const LEFT: i32 = 156;
-    pub const RIGHT: i32 = 157;
-    pub const CTRL: i32 = 159;
-    pub const SHIFT: i32 = 160;
-    pub const F7: i32 = 173;
-    pub const F8: i32 = 174;
-    pub const MOUSE1: i32 = 200;
-    pub const MOUSE2: i32 = 201;
-    pub const WHEEL_DOWN: i32 = 205;
-    pub const fn ch(c: char) -> i32 {
-        c as i32
-    }
+    pub const BUTTON_A: i32 = 1;
+    pub const BUTTON_B: i32 = 2;
+    pub const BUTTON_X: i32 = 3;
+    pub const BUTTON_Y: i32 = 4;
+    pub const BUTTON_LSHLDR: i32 = 5;
+    pub const BUTTON_RSHLDR: i32 = 6;
+    pub const BUTTON_START: i32 = 14;
+    pub const BUTTON_BACK: i32 = 15;
+    pub const BUTTON_LSTICK: i32 = 16;
+    pub const BUTTON_RSTICK: i32 = 17;
+    pub const BUTTON_LTRIG: i32 = 18;
+    pub const BUTTON_RTRIG: i32 = 19;
+    pub const DPAD_UP: i32 = 20;
+    pub const DPAD_DOWN: i32 = 21;
+    pub const DPAD_LEFT: i32 = 22;
+    pub const DPAD_RIGHT: i32 = 23;
 }
 
-/// Startup commands that give the pad console-style actions.
-pub fn extra_binds() -> Vec<String> {
-    ["+bind", "F7", "+usereload", "+bind", "F8", "+speed_throw"].iter().map(|s| s.to_string()).collect()
+/// GamePad structs (124 bytes each, pad 0 first):
+///   +0 u8 enabled, +2 i16 digitals, +4 i16 lastDigitals,
+///   +8 f32 analogs[2] (LT, RT), +16 lastAnalogs[2], +24 f32 sticks[4] (LX, LY, RX, RY),
+///   +40 lastSticks[4].
+const GPAD0: u32 = 147_054_240;
+/// Physical axis values read by CL_GamepadAxisValue: i32[6] scaled by 1/65535, in the
+/// order of the engine's axis names: A_RSTICK_X, A_RSTICK_Y, A_LSTICK_X, A_LSTICK_Y,
+/// A_RTRIGGER, A_LTRIGGER.
+const PHYS_AXES: u32 = 13_382_032;
+
+/// XInput-style digital bits (GamePadButton & 0xffff).
+mod bit {
+    pub const UP: u16 = 0x0001;
+    pub const DOWN: u16 = 0x0002;
+    pub const LEFT: u16 = 0x0004;
+    pub const RIGHT: u16 = 0x0008;
+    pub const START: u16 = 0x0010;
+    pub const BACK: u16 = 0x0020;
+    pub const L3: u16 = 0x0040;
+    pub const R3: u16 = 0x0080;
+    pub const LB: u16 = 0x0100;
+    pub const RB: u16 = 0x0200;
+    pub const A: u16 = 0x1000;
+    pub const B: u16 = 0x2000;
+    pub const X: u16 = 0x4000;
+    pub const Y: u16 = 0x8000;
+}
+
+/// Startup commands: load BO1's controller layout (Start = pause menu, Back = scoreboard,
+/// sticks via bindaxis). gpad_enabled is driven by `set_gpad_dvars` instead, so keyboard
+/// play keeps keyboard hint text.
+pub fn startup_args() -> Vec<String> {
+    ["+exec", "default_controller.cfg"].iter().map(|s| s.to_string()).collect()
+}
+
+/// Pointers to the gpad_enabled / gpad_present dvars (GPad_InitAll stores them here).
+const DVAR_GPAD_ENABLED: u32 = 147_054_220;
+const DVAR_GPAD_PRESENT: u32 = 147_054_224;
+/// dvar_s.current for a bool dvar (CL_CreateCmd reads gpad_enabled at this offset).
+const DVAR_CURRENT: u32 = 24;
+
+/// gpad_enabled/gpad_present follow the controller: on gives button-glyph hints and the
+/// gamepad view code; off gives keyboard hints.
+fn set_gpad_dvars(on: bool) {
+    for slot in [DVAR_GPAD_ENABLED, DVAR_GPAD_PRESENT] {
+        let dvar = mem::u32(slot);
+        if dvar != 0 && mem::u8(dvar + DVAR_CURRENT) != on as u8 {
+            mem::set_u8(dvar + DVAR_CURRENT, on as u8);
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -61,9 +110,64 @@ pub enum Btn {
     Right,
 }
 
+impl Btn {
+    const ALL: [Btn; 14] = [
+        Btn::A, Btn::B, Btn::X, Btn::Y, Btn::LB, Btn::RB, Btn::L3, Btn::R3,
+        Btn::Start, Btn::Back, Btn::Up, Btn::Down, Btn::Left, Btn::Right,
+    ];
+
+    fn bit(self) -> u16 {
+        match self {
+            Btn::A => bit::A,
+            Btn::B => bit::B,
+            Btn::X => bit::X,
+            Btn::Y => bit::Y,
+            Btn::LB => bit::LB,
+            Btn::RB => bit::RB,
+            Btn::L3 => bit::L3,
+            Btn::R3 => bit::R3,
+            Btn::Start => bit::START,
+            Btn::Back => bit::BACK,
+            Btn::Up => bit::UP,
+            Btn::Down => bit::DOWN,
+            Btn::Left => bit::LEFT,
+            Btn::Right => bit::RIGHT,
+        }
+    }
+
+    fn key(self) -> i32 {
+        match self {
+            Btn::A => key::BUTTON_A,
+            Btn::B => key::BUTTON_B,
+            Btn::X => key::BUTTON_X,
+            Btn::Y => key::BUTTON_Y,
+            Btn::LB => key::BUTTON_LSHLDR,
+            Btn::RB => key::BUTTON_RSHLDR,
+            Btn::L3 => key::BUTTON_LSTICK,
+            Btn::R3 => key::BUTTON_RSTICK,
+            Btn::Start => key::BUTTON_START,
+            Btn::Back => key::BUTTON_BACK,
+            Btn::Up => key::DPAD_UP,
+            Btn::Down => key::DPAD_DOWN,
+            Btn::Left => key::DPAD_LEFT,
+            Btn::Right => key::DPAD_RIGHT,
+        }
+    }
+}
+
+/// Controller family, for logging and (later) glyph selection.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum PadKind {
+    #[default]
+    Xbox,
+    PlayStation,
+    Other,
+}
+
 #[derive(Clone, Default, Debug)]
 pub struct PadState {
     pub connected: bool,
+    pub kind: PadKind,
     /// Sticks in [-1, 1], y positive = up.
     pub lx: f32,
     pub ly: f32,
@@ -77,32 +181,19 @@ pub struct PadState {
 
 pub type Event = (i32, i32, i32);
 
+/// Trigger travel that counts as a BUTTON_LTRIG/RTRIG press (gpad_button_deadzone-like).
+const TRIGGER_PRESS: f32 = 0.3;
+
 pub struct Mapper {
     held: HashSet<i32>,
-    prev: HashSet<Btn>,
     menu: Option<bool>,
-    cursor: (f32, f32),
-    look_acc: (f32, f32),
     intro_released: bool,
-    pub look_speed: f32,
-}
-
-fn deadzone(v: f32, dz: f32) -> f32 {
-    let a = v.abs();
-    if a < dz { 0.0 } else { v.signum() * (a - dz) / (1.0 - dz) }
+    was_connected: bool,
 }
 
 impl Mapper {
     pub fn new() -> Self {
-        Self {
-            held: HashSet::new(),
-            prev: HashSet::new(),
-            menu: None,
-            cursor: (320.0, 240.0),
-            look_acc: (0.0, 0.0),
-            intro_released: false,
-            look_speed: 1400.0,
-        }
+        Self { held: HashSet::new(), menu: None, intro_released: false, was_connected: false }
     }
 
     fn set(&mut self, out: &mut Vec<Event>, k: i32, down: bool) {
@@ -121,134 +212,134 @@ impl Mapper {
         }
     }
 
-    fn tap(out: &mut Vec<Event>, k: i32) {
-        out.push((KEY, k, 1));
-        out.push((KEY, k, 0));
-    }
-
-    /// One tick. `dt` seconds, `menu` from KB_UIState, `size` = drawing buffer.
-    pub fn update(&mut self, pad: &PadState, dt: f32, menu: bool, size: (i32, i32)) -> Vec<Event> {
+    /// One tick: mirror the pad into engine memory and return key events for KB_Input.
+    pub fn update(&mut self, pad: &PadState, menu: bool) -> Vec<Event> {
         let mut out = Vec::new();
+        // Every tick: the dvars are registered after startup and profile loads reset them.
+        set_gpad_dvars(pad.connected);
         if !pad.connected {
-            if !self.held.is_empty() {
+            if self.was_connected {
                 self.release_all(&mut out);
+                write_gpad(&PadState::default());
+                self.was_connected = false;
             }
-            self.prev.clear();
             return out;
         }
-        let pressed = |b: Btn| pad.buttons.contains(&b) && !self.prev.contains(&b);
+        if !self.was_connected {
+            crate::log::info(&format!("controller active ({:?})", pad.kind));
+            self.was_connected = true;
+        }
+        write_gpad(pad);
 
         // The engine holds the first loaded frame until the player is "in" (engine.js play()).
-        if !self.intro_released && (pressed(Btn::A) || pressed(Btn::Start)) {
+        if !self.intro_released && (pad.buttons.contains(&Btn::A) || pad.buttons.contains(&Btn::Start)) {
             self.intro_released = true;
             out.push((INTRO, 1, 0));
         }
 
+        // Menus unlock the pointer; the engine's BrowserFrame gamepad cursor takes over.
         if self.menu != Some(menu) {
             self.release_all(&mut out);
             out.push((LOCK, (!menu) as i32, 0));
-            if menu {
-                self.cursor = (size.0 as f32 / 2.0, size.1 as f32 / 2.0);
-                out.push((CURSOR, self.cursor.0 as i32, self.cursor.1 as i32));
-            }
             self.menu = Some(menu);
         }
 
-        if menu {
-            self.menu_tick(pad, dt, size, &mut out);
-        } else {
-            self.game_tick(pad, dt, &mut out);
+        for b in Btn::ALL {
+            self.set(&mut out, b.key(), pad.buttons.contains(&b));
         }
-        self.prev = pad.buttons.clone();
+        self.set(&mut out, key::BUTTON_LTRIG, pad.lt > TRIGGER_PRESS);
+        self.set(&mut out, key::BUTTON_RTRIG, pad.rt > TRIGGER_PRESS);
         out
     }
+}
 
-    fn game_tick(&mut self, pad: &PadState, dt: f32, out: &mut Vec<Event>) {
-        let b = |x: Btn| pad.buttons.contains(&x);
-        let lx = deadzone(pad.lx, 0.25);
-        let ly = deadzone(pad.ly, 0.25);
-        self.set(out, key::ch('w'), ly > 0.3);
-        self.set(out, key::ch('s'), ly < -0.3);
-        self.set(out, key::ch('d'), lx > 0.3);
-        self.set(out, key::ch('a'), lx < -0.3);
+/// Write pad 0's GamePad struct and the physical axes, as GPad_UpdateAll did on Xbox.
+fn write_gpad(pad: &PadState) {
+    let digitals = Btn::ALL.iter().filter(|b| pad.buttons.contains(b)).fold(0u16, |m, b| m | b.bit());
+    let g = GPAD0;
+    // Previous state first, so GPad_IsButtonPressed sees the edge.
+    mem::write(g + 4, &mem::bytes(g + 2, 2).to_vec());
+    mem::write(g + 16, &mem::bytes(g + 8, 8).to_vec());
+    mem::write(g + 40, &mem::bytes(g + 24, 16).to_vec());
+    mem::set_u8(g, pad.connected as u8);
+    mem::write(g + 2, &digitals.to_le_bytes());
+    mem::set_f32(g + 8, pad.lt);
+    mem::set_f32(g + 12, pad.rt);
+    for (i, v) in [pad.lx, pad.ly, pad.rx, pad.ry].into_iter().enumerate() {
+        mem::set_f32(g + 24 + 4 * i as u32, v);
+    }
+    let axis = |v: f32| (v.clamp(-1.0, 1.0) * 65535.0) as i32;
+    for (i, v) in [pad.rx, pad.ry, pad.lx, pad.ly, pad.rt, pad.lt].into_iter().enumerate() {
+        mem::set_i32(PHYS_AXES + 4 * i as u32, axis(v));
+    }
+}
 
-        self.set(out, key::MOUSE1, pad.rt > 0.35);
-        self.set(out, key::F8, pad.lt > 0.35); // +speed_throw (hold ADS)
-        self.set(out, key::SPACE, b(Btn::A));
-        self.set(out, key::ch('c'), b(Btn::B)); // togglecrouch
-        self.set(out, key::F7, b(Btn::X)); // +usereload
-        self.set(out, key::ch('1'), b(Btn::Y)); // weapnext
-        self.set(out, key::ch('g'), b(Btn::RB)); // lethal
-        self.set(out, key::ch('4'), b(Btn::LB)); // tactical
-        self.set(out, key::SHIFT, b(Btn::L3)); // sprint
-        self.set(out, key::ch('v'), b(Btn::R3)); // melee
-        self.set(out, key::ESC, b(Btn::Start));
-        self.set(out, key::TAB, b(Btn::Back));
-        self.set(out, key::ch('x'), b(Btn::Up)); // actionslot 1
-        self.set(out, key::ch('7'), b(Btn::Down)); // actionslot 2
-        self.set(out, key::ch('5'), b(Btn::Left)); // actionslot 3
-        self.set(out, key::ch('6'), b(Btn::Right)); // actionslot 4
+// ---------------------------------------------------------------------------------------
+// Debug: BO1Z_FAKEPAD scripts a virtual controller on desktop, for testing without one.
+// Format: "<seconds>:<input>[=<value>];..." where input is a Btn name (A, Start, Down, ...)
+// or an axis (lx, ly, rx, ry, lt, rt). A button without "=0" is pressed; "=0" releases it.
+// Example: BO1Z_FAKEPAD="20:Start;20.2:Start=0;22:Down;22.2:Down=0;30:ly=1;32:ly=0"
 
-        // Right stick -> relative mouse, squared response like MAP_SQUARED.
-        let rx = deadzone(pad.rx, 0.15);
-        let ry = deadzone(pad.ry, 0.15);
-        let ads = if pad.lt > 0.35 { 0.55 } else { 1.0 };
-        self.look_acc.0 += rx * rx.abs() * self.look_speed * ads * dt;
-        self.look_acc.1 += -ry * ry.abs() * self.look_speed * 0.75 * ads * dt;
-        let dx = self.look_acc.0.trunc();
-        let dy = self.look_acc.1.trunc();
-        self.look_acc.0 -= dx;
-        self.look_acc.1 -= dy;
-        if dx != 0.0 || dy != 0.0 {
-            out.push((MOUSE, dx as i32, dy as i32));
+pub struct FakePad {
+    steps: Vec<(f32, String, f32)>,
+    state: PadState,
+}
+
+impl FakePad {
+    pub fn from_env() -> Option<Self> {
+        let spec = std::env::var("BO1Z_FAKEPAD").ok()?;
+        let mut steps = Vec::new();
+        for item in spec.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+            let (t, rest) = item.split_once(':')?;
+            let (name, v) = rest.split_once('=').map_or((rest, 1.0), |(n, v)| (n, v.parse().unwrap_or(0.0)));
+            steps.push((t.parse::<f32>().ok()?, name.to_string(), v));
         }
+        steps.sort_by(|a, b| a.0.total_cmp(&b.0));
+        crate::log::info(&format!("fake pad: {} steps", steps.len()));
+        Some(Self { steps, state: PadState { connected: true, ..Default::default() } })
     }
 
-    fn menu_tick(&mut self, pad: &PadState, dt: f32, size: (i32, i32), out: &mut Vec<Event>) {
-        let pressed = |b: Btn| pad.buttons.contains(&b) && !self.prev.contains(&b);
-        let released = |b: Btn| !pad.buttons.contains(&b) && self.prev.contains(&b);
-        // Either stick moves the cursor; speed scales with the screen.
-        let sx = deadzone(if pad.lx.abs() > pad.rx.abs() { pad.lx } else { pad.rx }, 0.2);
-        let sy = deadzone(if pad.ly.abs() > pad.ry.abs() { pad.ly } else { pad.ry }, 0.2);
-        if sx != 0.0 || sy != 0.0 {
-            let speed = size.1.max(480) as f32 * 1.1;
-            self.cursor.0 = (self.cursor.0 + sx * sx.abs() * speed * dt).clamp(0.0, (size.0 - 1).max(0) as f32);
-            self.cursor.1 = (self.cursor.1 - sy * sy.abs() * speed * dt).clamp(0.0, (size.1 - 1).max(0) as f32);
-            out.push((CURSOR, self.cursor.0 as i32, self.cursor.1 as i32));
+    pub fn poll(&mut self, t: f32) -> PadState {
+        while self.steps.first().is_some_and(|s| s.0 <= t) {
+            let (_, name, v) = self.steps.remove(0);
+            crate::log::info(&format!("fake pad @{t:.1}s: {name}={v}"));
+            let s = &mut self.state;
+            match name.as_str() {
+                "lx" => s.lx = v,
+                "ly" => s.ly = v,
+                "rx" => s.rx = v,
+                "ry" => s.ry = v,
+                "lt" => s.lt = v,
+                "rt" => s.rt = v,
+                b => {
+                    if let Some(btn) = Btn::ALL.iter().find(|x| format!("{x:?}").eq_ignore_ascii_case(b)) {
+                        if v != 0.0 {
+                            s.buttons.insert(*btn);
+                        } else {
+                            s.buttons.remove(btn);
+                        }
+                    }
+                }
+            }
         }
-        if pressed(Btn::A) {
-            out.push((CURSOR, self.cursor.0 as i32, self.cursor.1 as i32));
-            out.push((KEY, key::MOUSE1, 1));
-        }
-        if released(Btn::A) {
-            out.push((KEY, key::MOUSE1, 0));
-        }
-        if pressed(Btn::B) || pressed(Btn::Start) {
-            Self::tap(out, key::ESC);
-        }
-        if pressed(Btn::Up) {
-            Self::tap(out, key::UP);
-        }
-        if pressed(Btn::Down) {
-            Self::tap(out, key::DOWN);
-        }
-        if pressed(Btn::Left) {
-            Self::tap(out, key::LEFT);
-        }
-        if pressed(Btn::Right) {
-            Self::tap(out, key::RIGHT);
-        }
-        if pressed(Btn::X) {
-            Self::tap(out, key::ENTER);
-        }
-        if pressed(Btn::Y) {
-            Self::tap(out, key::WHEEL_DOWN);
-        }
+        self.state.clone()
     }
 }
 
 // ---------------------------------------------------------------------------------------
 // Pad backends
+
+/// Controller family from its name / GCController.productCategory.
+fn pad_kind(name: &str) -> PadKind {
+    let n = name.to_ascii_lowercase();
+    if ["dualsense", "dualshock", "playstation", "ps4", "ps5", "wireless controller"].iter().any(|k| n.contains(k)) {
+        PadKind::PlayStation
+    } else if n.contains("xbox") || n.contains("xinput") {
+        PadKind::Xbox
+    } else {
+        PadKind::Other
+    }
+}
 
 #[cfg(not(target_os = "ios"))]
 pub struct Pads {
@@ -283,6 +374,7 @@ impl Pads {
         let Some((_, p)) = g.gamepads().find(|(_, p)| p.is_connected()) else { return PadState::default() };
         let mut s = PadState {
             connected: true,
+            kind: pad_kind(p.name()),
             lx: p.value(Axis::LeftStickX),
             ly: p.value(Axis::LeftStickY),
             rx: p.value(Axis::RightStickX),
@@ -327,13 +419,14 @@ impl Pads {
     /// GCController.controllers().first().extendedGamepad (Xbox One/Series pads over
     /// Bluetooth; Xbox 360 pads are not supported by iOS itself).
     pub fn poll(&mut self) -> PadState {
-        use objc2_game_controller::GCController;
+        use objc2_game_controller::{GCController, GCDevice};
         unsafe {
             let list = GCController::controllers();
             let Some(c) = list.firstObject() else { return PadState::default() };
             let Some(gp) = c.extendedGamepad() else { return PadState::default() };
             let mut s = PadState {
                 connected: true,
+                kind: pad_kind(&c.productCategory().to_string()),
                 lx: gp.leftThumbstick().xAxis().value(),
                 ly: gp.leftThumbstick().yAxis().value(),
                 rx: gp.rightThumbstick().xAxis().value(),
