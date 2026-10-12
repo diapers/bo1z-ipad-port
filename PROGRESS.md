@@ -96,3 +96,6 @@ Note: iOS only supports Xbox One S / Series pads over Bluetooth (not Xbox 360 pa
   precompiles, embeds. App no longer needs "Open with JIT".
 - IPA build 3 (efe6ee6, CI run 38221436862): engine embedded (25.8 MB __TEXT,__bo1z_engine,
   align 2^14). build/BO1Z-five.ipa = 790 MB. Waiting for device test (normal tap, no JIT).
+- Device test of build 3: AOT load OK (6.4 ms), ANGLE Metal on M1 OK, all WebGL2 exts OK; engine quit:
+  "Could not find zone .../zone/english/code_pre_gfx_mp.ff" -- engine asks zone/common, pack has zone/Common.
+- Build 4 (2081507, run 38222917146): case-insensitive fs lookup + r_customMode = surface size + 1x scale on iOS.
