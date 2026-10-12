@@ -198,3 +198,4 @@ Build 4 runs on the iPad (Five playable). Issues from the screen recording + use
   open/close are ignored until released (Start no longer double-fires).
 - Debug: BO1Z_NOINPUT=1 (ignore real mouse/keyboard, never grab), FAKEPAD "<t>:shot",
   BO1Z_ARGS="+set ...", BO1Z_GLSTATS=1, BO1Z_SHADERDUMP=<dir>.
+- Build 6f81fa3 (CI run 38300609900) -> D:\bo1z\BO1Z-all.ipa (6.73 GB). PC check: Moon + Five render clean, Five 60 fps capped (debug host). Awaiting device test + bo1z.log frames lines.
