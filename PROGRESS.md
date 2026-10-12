@@ -176,3 +176,4 @@ Build 4 runs on the iPad (Five playable). Issues from the screen recording + use
   still running after load). Desktop video drawn with GDI: a second ANGLE GL context on the UI
   thread crashed (segfault) alongside the engine's context.
 - Test the iPad data layout on PC: D:\bo1z\idx-game (maps/*.json + junctions store, menu).
+- Build 20548b0 (CI run 38240728800): crash fix + cinematic flow -> D:o1z\BO1Z-all.ipa (6.73 GB). Awaiting device test.
