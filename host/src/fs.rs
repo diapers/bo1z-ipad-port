@@ -157,6 +157,21 @@ fn kind(v: &[String]) -> Kind {
 fn child(st: &State, parent: i32, name: &str) -> Option<Vec<String>> {
     let mut v = st.dirs.get(parent)?.clone();
     v.push(name.to_string());
+    // The engine asks for e.g. "zone/common" while the pack ships "zone/Common". Lookups
+    // are case-insensitive, as on Windows: if the exact name is missing, use the entry
+    // whose name matches ignoring ASCII case.
+    if !is_synthetic_dir(&v) && std::fs::symlink_metadata(real(&v)).is_err() {
+        let dir = real(&v[..v.len() - 1]);
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for e in rd.flatten() {
+                let n = e.file_name().to_string_lossy().into_owned();
+                if n.eq_ignore_ascii_case(name) {
+                    *v.last_mut().unwrap() = n;
+                    break;
+                }
+            }
+        }
+    }
     Some(v)
 }
 
@@ -227,6 +242,10 @@ pub fn register(l: &mut Linker<Ctx>) -> Result<()> {
         "_wasmfs_opfs_get_child",
         |mut cx: Cx, ctx: i32, parent: i32, name: i32, type_ptr: i32, id_ptr: i32| -> Result<()> {
             let name = mem::cstr(name as u32);
+            if std::env::var_os("BO1Z_FSLOG").is_some() {
+                let st = STATE.lock();
+                log::info(&format!("fs get_child {}/{name}", st.dirs.get(parent).map(|v| vjoin(v)).unwrap_or_default()));
+            }
             let (ty, id) = {
                 let mut st = STATE.lock();
                 match child(&st, parent, &name) {
