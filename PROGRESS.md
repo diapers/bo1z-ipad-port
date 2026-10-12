@@ -42,7 +42,9 @@ game packs bundled inside. Keep this file current; it is the hand-off document.
 | first compile on Windows | — | DONE (wasmtime 49; uses wasmtime::Error not anyhow in host fns) |
 | run on Windows (ANGLE DLLs from an Electron app, e.g. LM Studio) | — | todo |
 | iOS packaging + ANGLE-for-iOS CI | ios/, .github/workflows/ios-build.yml | written by agent, untested (see ios/README.md, ios/IOS_RISKS.md) |
-| build IPA in CI + test on iPad | — | todo (needs GitHub repo from user) |
+| browser-main role on its own 32 MiB-stack thread (UI thread only forwards input) | rt.rs/platform.rs | DONE |
+| git repo initialised, first commit cf42c34 | — | DONE (no remote yet) |
+| build IPA in CI + test on iPad | — | NEXT: needs a public GitHub repo URL from the user |
 
 ## Toolchain on this PC
 Rust (rustup, stable MSVC) + VS 2022 C++ workload installed 2026-10-11.
@@ -68,3 +70,13 @@ Build: `cd host && cargo build --release`. Run needs `libEGL.dll` + `libGLESv2.d
 - On iOS pass winit's `ui_view.layer` to ANGLE (it adds its own CAMetalLayer and tracks size).
 - Dev run: `cd host/target/debug && ./bo1z_host.exe --map five --wasm KisakBlack-native.wasm`
   (game/five and game/kino are junctions to pack-*/files; libEGL/libGLESv2/d3dcompiler_47 copied from LM Studio).
+
+## Next steps (in order)
+1. User creates an empty PUBLIC GitHub repo; `git remote add origin <url> && git push -u origin main`.
+2. Actions -> ios-build runs (first run fetches ANGLE). Fix any aarch64-apple-ios compile errors
+   (iOS-only code paths: input.rs GameController, platform.rs native_window, cpal CoreAudio).
+3. Download artifact BO1Z.ipa, then on this PC:
+   `node inject-assets.mjs --ipa=BO1Z.ipa --maps=five` (adds game/five + KisakBlack-native.wasm).
+4. TrollStore install; launch with "Open with JIT" (long-press). Log: Files app -> BO1Z -> bo1z.log.
+5. Later: AOT precompile (no per-launch JIT), loading-screen video decode, Kino/other maps picker.
+Note: iOS only supports Xbox One S / Series pads over Bluetooth (not Xbox 360 pads).
