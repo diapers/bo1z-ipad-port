@@ -12,7 +12,9 @@ use winit::keyboard::PhysicalKey;
 use winit::window::{CursorGrabMode, Window, WindowId};
 
 use crate::input::{self, FakePad, Mapper, Pads};
-use crate::{gl_ctx, log, rt};
+use crate::maps::MapInfo;
+use crate::menu::Menu;
+use crate::{gl_ctx, log, rt, Launcher};
 
 
 pub fn quit(code: i32) -> ! {
@@ -29,13 +31,23 @@ pub fn fatal(msg: &str) -> ! {
 
 pub struct App {
     pub egl_lib: PathBuf,
-    boot: Option<rt::Boot>,
+    launcher: Launcher,
+    /// The map selector while no map has been chosen.
+    menu: Option<Menu>,
+    direct: Option<MapInfo>,
+    cursor: (f64, f64),
+    #[cfg(target_os = "ios")]
+    menu_overlay: Option<crate::menu::Overlay>,
+    #[cfg(not(target_os = "ios"))]
+    menu_art: Option<crate::menu::GlArt>,
     window: Option<Window>,
     booted: bool,
     pads: Option<Pads>,
     fake_pad: Option<FakePad>,
     mapper: Mapper,
     grabbed: bool,
+    /// The mouse was released because a game menu took the cursor; re-lock when it closes.
+    regrab: bool,
     started: Instant,
     autoplay: Option<f32>,
     #[cfg(target_os = "ios")]
@@ -43,16 +55,24 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(egl_lib: PathBuf, boot: rt::Boot) -> Self {
+    pub fn new(egl_lib: PathBuf, launcher: Launcher, menu: Menu, direct: Option<MapInfo>) -> Self {
         Self {
             egl_lib,
-            boot: Some(boot),
+            launcher,
+            menu: Some(menu),
+            direct,
+            cursor: (0.0, 0.0),
+            #[cfg(target_os = "ios")]
+            menu_overlay: None,
+            #[cfg(not(target_os = "ios"))]
+            menu_art: None,
             window: None,
             booted: false,
             pads: None,
             fake_pad: FakePad::from_env(),
             mapper: Mapper::new(),
             grabbed: false,
+            regrab: false,
             started: Instant::now(),
             // Debug: BO1Z_AUTOPLAY=<seconds> releases the intro gate without input.
             autoplay: std::env::var("BO1Z_AUTOPLAY").ok().and_then(|s| s.parse().ok()),
@@ -74,25 +94,90 @@ impl App {
         let window = el.create_window(attrs)?;
         let native = native_window(&window)?;
         gl_ctx::create(&self.egl_lib, native)?;
-        #[cfg(target_os = "ios")]
-        {
-            self.loading_overlay = game_view(&window).and_then(|v| crate::loading::Overlay::new(&v));
-        }
         self.window = Some(window);
         self.pads = Some(Pads::new());
         log::info(&format!("window + EGL ready, surface {:?}", gl_ctx::surface_size()));
-        if let Some(mut boot) = self.boot.take() {
-            // Render at the drawing-buffer size (engine.js passes the canvas size the same way).
-            let (w, h) = gl_ctx::surface_size();
-            if w > 0 && h > 0 {
-                if let Some(i) = boot.args.iter().position(|a| a == "r_customMode") {
-                    boot.args[i + 1] = format!("{w}x{h}");
+        if let Some(m) = self.direct.take() {
+            return self.launch(m);
+        }
+        #[cfg(target_os = "ios")]
+        if let (Some(v), Some(menu)) = (self.window.as_ref().and_then(game_view), self.menu.as_ref()) {
+            self.menu_overlay = crate::menu::Overlay::new(&v, menu);
+        }
+        self.draw_menu();
+        Ok(())
+    }
+
+    /// Boot the engine with the chosen map, behind the loading bar.
+    fn launch(&mut self, m: MapInfo) -> anyhow::Result<()> {
+        self.menu = None;
+        #[cfg(target_os = "ios")]
+        {
+            if let Some(o) = self.menu_overlay.take() {
+                o.remove();
+            }
+            self.loading_overlay = self.window.as_ref().and_then(game_view).and_then(|v| crate::loading::Overlay::new(&v));
+        }
+        #[cfg(not(target_os = "ios"))]
+        {
+            if let Some(a) = self.menu_art.take() {
+                if gl_ctx::make_current().is_ok() {
+                    a.delete();
                 }
             }
-            rt::start_browser_main(boot);
+            gl_ctx::release_current();
+            if let Some(w) = self.window.as_ref() {
+                w.set_title(&format!("BO1Z - {}", m.name));
+            }
         }
+        // Render at the drawing-buffer size (engine.js passes the canvas size the same way).
+        let boot = self.launcher.boot(&m, gl_ctx::surface_size())?;
+        rt::start_browser_main(boot);
         self.booted = true;
         Ok(())
+    }
+
+    fn choose(&mut self, i: usize) {
+        let Some(m) = self.menu.as_ref().and_then(|menu| menu.maps.get(i).cloned()) else { return };
+        log::info(&format!("selected {}", m.name));
+        if let Err(e) = self.launch(m) {
+            fatal(&format!("cannot start map: {e:?}"));
+        }
+    }
+
+    /// Redraw the selector if its state changed.
+    fn draw_menu(&mut self) {
+        let Some(menu) = self.menu.as_mut() else { return };
+        if !menu.dirty {
+            return;
+        }
+        menu.dirty = false;
+        #[cfg(target_os = "ios")]
+        if let Some(o) = self.menu_overlay.as_ref() {
+            o.update(menu);
+        }
+        #[cfg(not(target_os = "ios"))]
+        {
+            let (w, h) = gl_ctx::surface_size();
+            if gl_ctx::make_current().is_ok() {
+                let art = self.menu_art.get_or_insert_with(crate::menu::GlArt::new);
+                crate::menu::draw_gl(menu, art, w, h);
+                gl_ctx::swap();
+            }
+            if let Some(win) = self.window.as_ref() {
+                if let Some(m) = menu.maps.get(menu.sel) {
+                    win.set_title(&format!("BO1Z - {}  (arrows / d-pad, Enter / A to play)", m.name));
+                }
+            }
+        }
+    }
+
+    /// Window size in physical pixels (the unit of cursor and touch positions).
+    fn win_size(&self) -> (f32, f32) {
+        self.window.as_ref().map_or((1.0, 1.0), |w| {
+            let s = w.inner_size();
+            (s.width.max(1) as f32, s.height.max(1) as f32)
+        })
     }
 
     fn send(&mut self, ev: (i32, i32, i32)) {
@@ -119,6 +204,27 @@ impl App {
     }
 
     fn tick(&mut self) {
+        if self.menu.is_some() {
+            let pad = match (self.fake_pad.as_mut(), self.pads.as_mut()) {
+                (Some(f), _) => Some(f.poll(self.started.elapsed().as_secs_f32())),
+                (None, Some(p)) => Some(p.poll()),
+                (None, None) => None,
+            };
+            if let Some(pad) = pad {
+                let chosen = self.menu.as_mut().and_then(|m| m.pad(&pad));
+                if let Some(i) = chosen {
+                    return self.choose(i);
+                }
+            }
+            // Debug: BO1Z_AUTOPICK=<slug> chooses without input.
+            if let Ok(slug) = std::env::var("BO1Z_AUTOPICK") {
+                if let Some(i) = self.menu.as_ref().and_then(|m| m.maps.iter().position(|x| x.slug == slug)) {
+                    return self.choose(i);
+                }
+            }
+            self.draw_menu();
+            return;
+        }
         #[cfg(target_os = "ios")]
         if self.loading_overlay.as_ref().is_some_and(|o| !o.update()) {
             self.loading_overlay = None;
@@ -140,6 +246,25 @@ impl App {
             (None, None) => return,
         };
         let menu = rt::ui_state() & 1 != 0;
+        // Desktop: like the browser, a game menu (pause, settings) gets an absolute cursor;
+        // gameplay gets the locked, relative mouse back when the menu closes.
+        #[cfg(not(target_os = "ios"))]
+        if menu && self.grabbed {
+            self.set_grab(false);
+            self.regrab = true;
+            if let Some(w) = self.window.as_ref() {
+                let s = w.inner_size();
+                let c = winit::dpi::PhysicalPosition::new(s.width as f64 / 2.0, s.height as f64 / 2.0);
+                let _ = w.set_cursor_position(c);
+                self.cursor = (c.x, c.y);
+                rt::post_input(input::CURSOR, c.x as i32, c.y as i32);
+            }
+        } else if !menu && self.regrab {
+            self.regrab = false;
+            if self.window.as_ref().is_some_and(|w| w.has_focus()) {
+                self.set_grab(true);
+            }
+        }
         for ev in self.mapper.update(&pad, menu) {
             rt::post_input(ev.0, ev.1, ev.2);
         }
@@ -166,6 +291,43 @@ impl ApplicationHandler<()> for App {
                     self.set_grab(false);
                 }
             }
+            WindowEvent::Resized(_) if self.menu.is_some() => {
+                if let Some(m) = self.menu.as_mut() {
+                    m.dirty = true;
+                }
+                self.draw_menu();
+            }
+            WindowEvent::KeyboardInput { event, .. } if self.menu.is_some() => {
+                if let (PhysicalKey::Code(code), ElementState::Pressed) = (event.physical_key, event.state) {
+                    if let Some(i) = self.menu.as_mut().and_then(|m| m.key(code)) {
+                        self.choose(i);
+                    } else {
+                        self.draw_menu();
+                    }
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } if self.menu.is_some() => {
+                self.cursor = (position.x, position.y);
+                let (w, h) = self.win_size();
+                if let Some(m) = self.menu.as_mut() {
+                    m.hover(position.x as f32, position.y as f32, w, h);
+                }
+                self.draw_menu();
+            }
+            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } if self.menu.is_some() => {
+                let ((x, y), (w, h)) = ((self.cursor.0 as f32, self.cursor.1 as f32), self.win_size());
+                if let Some(i) = self.menu.as_mut().and_then(|m| m.tap(x, y, w, h)) {
+                    self.choose(i);
+                }
+            }
+            WindowEvent::Touch(t) if self.menu.is_some() => {
+                if t.phase == winit::event::TouchPhase::Ended {
+                    let ((x, y), (w, h)) = ((t.location.x as f32, t.location.y as f32), self.win_size());
+                    if let Some(i) = self.menu.as_mut().and_then(|m| m.tap(x, y, w, h)) {
+                        self.choose(i);
+                    }
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } => {
                 if let PhysicalKey::Code(code) = event.physical_key {
                     if let Some(k) = input::winit_key(code) {
@@ -186,7 +348,9 @@ impl ApplicationHandler<()> for App {
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
-                if !self.grabbed && state == ElementState::Pressed && button == MouseButton::Left {
+                // An unlocked click in gameplay only re-captures the mouse; in a menu it clicks.
+                let in_menu = rt::ready() && rt::ui_state() & 1 != 0;
+                if !self.grabbed && !in_menu && state == ElementState::Pressed && button == MouseButton::Left {
                     self.send((input::INTRO, 1, 0));
                     self.set_grab(true);
                     return;
@@ -213,6 +377,7 @@ impl ApplicationHandler<()> for App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
+                self.cursor = (position.x, position.y);
                 if !self.grabbed {
                     self.send((input::CURSOR, position.x as i32, position.y as i32));
                 }

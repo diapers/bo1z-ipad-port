@@ -47,10 +47,21 @@ function run(cmd, argv, cwd) {
   if (r.status !== 0) throw new Error(`${cmd} ${argv.join(' ')} exited ${r.status}`);
 }
 
+// Where this map's file tree lives. The merged content-addressed store is now the
+// primary source (all 10 maps, deduped to 6.61 GB via hard links); the old
+// pack-<slug>/files layout is still accepted if it exists.
+const STORE = resolve(args.store || 'E:/bo1z/maps');
+function mapRoot(slug) {
+  const candidates = [join(STORE, slug), join(`pack-${slug}`, 'files')];
+  for (const c of candidates) if (existsSync(join(c, 'manifest.json')) || existsSync(c)) return c;
+  return candidates[0];
+}
+
 // Same variant rule as verify-map.mjs: opus+fallback entries are mirrored as the fallback.
 async function verifyMap(slug) {
   const M = JSON.parse(readFileSync(join('manifests', `${slug}.json`), 'utf8'));
-  const root = join(`pack-${slug}`, 'files');
+  const root = mapRoot(slug);
+  if (!existsSync(root)) throw new Error(`no asset tree for "${slug}" (looked in ${root}); pass --store=<dir>`);
   const entries = [
     ...M.files.map(f => {
       const fb = f.opus && f.fallback;

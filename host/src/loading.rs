@@ -3,7 +3,6 @@
 //! of the pack's zone bytes read so far; the bar disappears once the engine reports the
 //! map's own zone as loaded ("KISAK_STARTUP leave=<zone> ...").
 
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::OnceLock;
 
@@ -12,24 +11,9 @@ static TOTAL: AtomicU64 = AtomicU64::new(0);
 static DONE: AtomicBool = AtomicBool::new(false);
 static ZONE_MARK: OnceLock<String> = OnceLock::new();
 
-/// Called at startup with the pack directory and the map's zone name.
-pub fn init(pack_dir: &Path, zone: &str) {
-    fn ff_bytes(dir: &Path) -> u64 {
-        let Ok(rd) = std::fs::read_dir(dir) else { return 0 };
-        rd.flatten()
-            .map(|e| {
-                let p = e.path();
-                if p.is_dir() {
-                    ff_bytes(&p)
-                } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("ff")) {
-                    e.metadata().map_or(0, |m| m.len())
-                } else {
-                    0
-                }
-            })
-            .sum()
-    }
-    TOTAL.store(ff_bytes(&pack_dir.join("zone")).max(1), Ordering::Relaxed);
+/// Called when a map is chosen: the bytes of its zone (.ff) files and its zone name.
+pub fn init(total_ff_bytes: u64, zone: &str) {
+    TOTAL.store(total_ff_bytes.max(1), Ordering::Relaxed);
     let _ = ZONE_MARK.set(format!("leave={zone} "));
 }
 

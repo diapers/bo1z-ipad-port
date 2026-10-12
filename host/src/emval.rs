@@ -104,6 +104,11 @@ impl Handles {
             h => self.vals.get(&h).map(|(v, _)| v.clone()).unwrap_or(Val::Undefined),
         }
     }
+    fn replace(&mut self, h: u32, v: Val) {
+        if let Some(e) = self.vals.get_mut(&h) {
+            e.0 = v;
+        }
+    }
     fn incref(&mut self, h: u32) {
         if h > 9 {
             if let Some(e) = self.vals.get_mut(&h) {
@@ -238,6 +243,18 @@ fn get_property(obj: &Val, key: &Val) -> Val {
     }
 }
 
+/// String(x) for a JSON value, as Array.prototype.join/sort see it.
+fn js_string(v: &serde_json::Value) -> String {
+    use serde_json::Value as J;
+    match v {
+        J::Null => String::new(),
+        J::String(s) => s.clone(),
+        J::Array(a) => a.iter().map(js_string).collect::<Vec<_>>().join(","),
+        J::Object(_) => "[object Object]".into(),
+        other => other.to_string(),
+    }
+}
+
 /// Calls the engine makes into JS. Logged once each; answer undefined unless known.
 fn call(this: &Val, method: Option<&str>, target: &str, args: &[Val]) -> Val {
     let shown: Vec<String> = args.iter().map(|a| a.describe()).collect();
@@ -254,6 +271,27 @@ fn call(this: &Val, method: Option<&str>, target: &str, args: &[Val]) -> Val {
             ("hasOwnProperty", J::Object(o)) => Val::Bool(o.contains_key(&k)),
             ("includes", J::Array(a)) => Val::Bool(a.contains(&to_json(&arg0))),
             ("indexOf", J::Array(a)) => Val::Num(a.iter().position(|x| *x == to_json(&arg0)).map_or(-1.0, |i| i as f64)),
+            // Default sort: compare the elements' string forms (Array.prototype.sort).
+            ("sort", J::Array(a)) => {
+                let mut v = a.clone();
+                v.sort_by(|x, y| js_string(x).cmp(&js_string(y)));
+                Val::Json(std::sync::Arc::new(J::Array(v)))
+            }
+            ("reverse", J::Array(a)) => Val::Json(std::sync::Arc::new(J::Array(a.iter().rev().cloned().collect()))),
+            ("join", J::Array(a)) => {
+                let sep = match &arg0 { Val::Undefined => ",".to_string(), Val::Str(s) => s.clone(), v => v.describe() };
+                Val::Str(a.iter().map(js_string).collect::<Vec<_>>().join(&sep))
+            }
+            ("slice", J::Array(a)) => {
+                let len = a.len() as i64;
+                let idx = |v: Option<&Val>, d: i64| match v {
+                    Some(Val::Num(n)) => { let n = *n as i64; if n < 0 { (len + n).max(0) } else { n.min(len) } }
+                    _ => d,
+                };
+                let (b, e) = (idx(args.first(), 0), idx(args.get(1), len));
+                Val::Json(std::sync::Arc::new(J::Array(if b < e { a[b as usize..e as usize].to_vec() } else { vec![] })))
+            }
+            ("toString", J::Array(a)) => Val::Str(a.iter().map(js_string).collect::<Vec<_>>().join(",")),
             _ => Val::Undefined,
         };
     }
@@ -277,6 +315,17 @@ fn call(this: &Val, method: Option<&str>, target: &str, args: &[Val]) -> Val {
                 serde_json::Value::Array(a) => Val::Json(std::sync::Arc::new(serde_json::Value::Array(
                     (0..a.len()).map(|i| serde_json::Value::String(i.to_string())).collect(),
                 ))),
+                _ => Val::Json(std::sync::Arc::new(serde_json::Value::Array(vec![]))),
+            },
+            _ => Val::Json(std::sync::Arc::new(serde_json::Value::Array(vec![]))),
+        },
+        "Object.values" | "Object.entries" => match &arg0 {
+            Val::Json(j) => match &**j {
+                serde_json::Value::Object(o) => Val::Json(std::sync::Arc::new(serde_json::Value::Array(if target == "Object.values" {
+                    o.values().cloned().collect()
+                } else {
+                    o.iter().map(|(k, v)| serde_json::Value::Array(vec![serde_json::Value::String(k.clone()), v.clone()])).collect()
+                }))),
                 _ => Val::Json(std::sync::Arc::new(serde_json::Value::Array(vec![]))),
             },
             _ => Val::Json(std::sync::Arc::new(serde_json::Value::Array(vec![]))),
@@ -432,6 +481,10 @@ pub fn register(l: &mut Linker<Ctx>) -> Result<()> {
             } else {
                 call(&this, method_name.as_deref(), &target, &argv)
             };
+            // sort/reverse mutate the array in place in JS: the receiver's handle must see it.
+            if matches!(method_name.as_deref(), Some("sort" | "reverse")) && matches!(v, Val::Json(_)) {
+                cx.data_mut().emval.replace(h as u32, v.clone());
+            }
             return_wire(&mut cx, &ret, v, destructors_ref as u32)
         },
     )?;

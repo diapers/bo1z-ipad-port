@@ -4,6 +4,11 @@
 //! graft read-only trees (the bundled game packs) onto virtual paths, e.g.
 //! "pack/files" -> <app bundle>/game/five, which is what `fs_b /opfs/pack/files` reads.
 //! Async imports finish by calling emscripten_proxy_finish(ctx), as the JS does.
+//!
+//! A mount is either a real directory tree (development) or an index (the app bundle):
+//! all maps share one content-addressed store (`game/store/<ab>/<sha256>`, each unique
+//! file once) and each map's `game/maps/<slug>.json` lists path -> blob. Index lookups
+//! are case-insensitive, like the real-directory fallback in `child`.
 
 use std::fs::{File, OpenOptions};
 use std::path::PathBuf;
@@ -86,29 +91,116 @@ fn vjoin(v: &[String]) -> String {
     v.join("/")
 }
 
-/// Real path for a virtual path, honouring mounts (longest prefix wins).
-fn real(v: &[String]) -> PathBuf {
+pub enum MountSrc {
+    Dir(PathBuf),
+    Index(VDir),
+}
+
+/// A directory of an index mount; keys are lower-case names.
+#[derive(Default)]
+pub struct VDir {
+    entries: std::collections::BTreeMap<String, (String, VNode)>,
+}
+
+enum VNode {
+    File(PathBuf),
+    Dir(VDir),
+}
+
+impl VDir {
+    /// Build from (relative path, blob path) pairs.
+    pub fn from_files(files: impl IntoIterator<Item = (String, PathBuf)>) -> Self {
+        let mut root = VDir::default();
+        for (path, blob) in files {
+            let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+            root.insert(&parts, blob);
+        }
+        root
+    }
+
+    fn insert(&mut self, parts: &[&str], blob: PathBuf) {
+        match parts {
+            [] => {}
+            [last] => {
+                self.entries.insert(last.to_ascii_lowercase(), (last.to_string(), VNode::File(blob)));
+            }
+            [dir, rest @ ..] => {
+                let e = self
+                    .entries
+                    .entry(dir.to_ascii_lowercase())
+                    .or_insert_with(|| (dir.to_string(), VNode::Dir(VDir::default())));
+                if let VNode::Dir(sub) = &mut e.1 {
+                    sub.insert(rest, blob);
+                }
+            }
+        }
+    }
+
+    fn get(&self, name: &str) -> Option<&VNode> {
+        self.entries.get(&name.to_ascii_lowercase()).map(|e| &e.1)
+    }
+}
+
+enum Node {
+    /// A real path (opfs root, a directory mount, or an index blob).
+    Path(PathBuf),
+    /// A directory inside an index mount.
+    VDir(&'static VDir),
+    Missing,
+}
+
+/// Resolve a virtual path, honouring mounts (longest prefix wins).
+fn node(v: &[String]) -> Node {
     let p = rt();
     let joined = vjoin(v);
-    let mut best: Option<(&str, &PathBuf)> = None;
-    for (mv, mr) in &p.paths.mounts {
+    let mut best: Option<(&str, &MountSrc)> = None;
+    for (mv, src) in &p.paths.mounts {
         let under = joined == *mv || joined.starts_with(&format!("{mv}/"));
         if under && best.map_or(true, |(b, _)| mv.len() > b.len()) {
-            best = Some((mv.as_str(), mr));
+            best = Some((mv.as_str(), src));
         }
     }
     match best {
-        Some((mv, mr)) => {
+        Some((mv, MountSrc::Dir(mr))) => {
             let rest = joined[mv.len()..].trim_start_matches('/');
-            if rest.is_empty() { mr.clone() } else { mr.join(rest) }
+            Node::Path(if rest.is_empty() { mr.clone() } else { mr.join(rest) })
         }
-        None => {
-            if joined.is_empty() {
-                p.paths.opfs_root.clone()
-            } else {
-                p.paths.opfs_root.join(&joined)
+        Some((mv, MountSrc::Index(root))) => {
+            let rest = joined[mv.len()..].trim_start_matches('/');
+            let mut d: &'static VDir = root;
+            let parts: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+            for (i, name) in parts.iter().enumerate() {
+                match d.get(name) {
+                    Some(VNode::Dir(sub)) => d = sub,
+                    Some(VNode::File(blob)) if i + 1 == parts.len() => return Node::Path(blob.clone()),
+                    _ => return Node::Missing,
+                }
             }
+            Node::VDir(d)
         }
+        None => Node::Path(if joined.is_empty() { p.paths.opfs_root.clone() } else { p.paths.opfs_root.join(&joined) }),
+    }
+}
+
+/// Real path for a virtual path; index directories and misses map to a path that does not
+/// exist, so file operations on them fail like they would on a missing file.
+fn real(v: &[String]) -> PathBuf {
+    match node(v) {
+        Node::Path(p) => p,
+        _ => PathBuf::from("/nonexistent/bo1z-index-dir"),
+    }
+}
+
+/// Children of an index directory: (name, 1 = file / 2 = dir).
+fn vdir_entries(v: &[String]) -> Option<Vec<(String, i32)>> {
+    match node(v) {
+        Node::VDir(d) => Some(
+            d.entries
+                .values()
+                .map(|(name, n)| (name.clone(), if matches!(n, VNode::Dir(_)) { 2 } else { 1 }))
+                .collect(),
+        ),
+        _ => None,
     }
 }
 
@@ -147,7 +239,12 @@ fn kind(v: &[String]) -> Kind {
     if is_synthetic_dir(v) {
         return Kind::Dir;
     }
-    match std::fs::metadata(real(v)) {
+    let path = match node(v) {
+        Node::VDir(_) => return Kind::Dir,
+        Node::Missing => return Kind::Missing,
+        Node::Path(p) => p,
+    };
+    match std::fs::metadata(path) {
         Ok(m) if m.is_dir() => Kind::Dir,
         Ok(_) => Kind::File,
         Err(_) => Kind::Missing,
@@ -160,7 +257,8 @@ fn child(st: &State, parent: i32, name: &str) -> Option<Vec<String>> {
     // The engine asks for e.g. "zone/common" while the pack ships "zone/Common". Lookups
     // are case-insensitive, as on Windows: if the exact name is missing, use the entry
     // whose name matches ignoring ASCII case.
-    if !is_synthetic_dir(&v) && std::fs::symlink_metadata(real(&v)).is_err() {
+    let in_index = matches!(node(&v[..v.len() - 1]), Node::VDir(_));
+    if !in_index && !is_synthetic_dir(&v) && std::fs::symlink_metadata(real(&v)).is_err() {
         let dir = real(&v[..v.len() - 1]);
         if let Ok(rd) = std::fs::read_dir(&dir) {
             for e in rd.flatten() {
@@ -274,7 +372,13 @@ pub fn register(l: &mut Linker<Ctx>) -> Result<()> {
                     for s in synthetic_children(&v) {
                         list.push((s, 2));
                     }
-                    if let Ok(rd) = std::fs::read_dir(real(&v)) {
+                    if let Some(entries) = vdir_entries(&v) {
+                        for (n, t) in entries {
+                            if !list.iter().any(|(x, _)| *x == n) {
+                                list.push((n, t));
+                            }
+                        }
+                    } else if let Ok(rd) = std::fs::read_dir(real(&v)) {
                         for e in rd.flatten() {
                             let n = e.file_name().to_string_lossy().into_owned();
                             if list.iter().any(|(x, _)| *x == n) {

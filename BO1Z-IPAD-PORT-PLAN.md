@@ -170,58 +170,73 @@ unavailable, so it is a supported variant — and 181 MB smaller for `sounds.pac
 
 ### Layout
 
-```
-bo1z-wasm/KisakBlack-web.wasm     9.6 MB   engine wasm (shared by ALL maps)
-pack-five/files/                   694 MB   Five   — 53 files, all verified
-pack-kino/files/                   707 MB   Kino der Toten — 53 files, all verified
-manifests/<slug>.json                      per-map manifests (all 10 saved)
-pack-manifest.json                         Five's manifest
-bo1z-wasm-host-surface.md                  the 170-import porting worklist
-```
-
-Scripts: `fetch-map.mjs` (map-selectable, resumable, hash-verifying downloader),
-`fetch-streams.mjs`, `verify-map.mjs` / `verify-pack.mjs` (hash checkers),
-`probe-maps.mjs` (prices every map), `probe-pack-protocol.mjs` (byte-protocol prover),
-`probe-opus-variants.mjs`, `probe-shared-files.mjs`, `wasm-inventory.mjs`.
-
-## 7. Maps: all 10 exist, we mirror 2
-
-`maps.js` MAP_LIST gives the slug for each map. `five` is the exception — it is the FIRST
-map, so its manifest and pack live at the site root, not under `/five/`:
-
-| slug | zone | disk | wire |
-|---|---|---|---|
-| five | zombie_pentagon | 717.5 MB | 410.8 MB |
-| kino | zombie_theater | 736.3 MB | 429.6 MB |
-| riese | zombie_cod5_factory | 786.4 MB | 479.0 MB |
-| nacht | zombie_cod5_prototype | 717.4 MB | 407.0 MB |
-| verruckt | zombie_cod5_asylum | 774.2 MB | 438.8 MB |
-| shinonuma | zombie_cod5_sumpf | 740.0 MB | 403.5 MB |
-| ascension | zombie_cosmodrome | 814.8 MB | 440.2 MB |
-| cotd | zombie_coast | 837.7 MB | 460.9 MB |
-| shangrila | zombie_temple | 860.7 MB | 487.1 MB |
-| moon | zombie_moon | **1.14 GB** | **662.7 MB** |
-| | **TOTAL** | **8.19 GB** | **4.69 GB** |
-
-**Mirrored so far: Five + Kino** (the proof-of-port pair). Fetch any other with:
+Everything below lives on **E:** (C: is too small to build on — 5.1 GB free).
 
 ```
-node fetch-map.mjs --map=<slug>
+E:\bo1z\store\<ab>\<sha256>       347 unique blobs, 6.61 GB — every byte stored once
+E:\bo1z\maps\<slug>\...           10 maps, each its own engine path tree (hard links)
+E:\bo1z\maps\<slug>\manifest.json
+index/share-index.json            blob index: hash -> size -> which maps reference it
+
+C:\Users\mirac\Desktop\dddd\
+  bo1z-wasm/KisakBlack-web.wasm   9.6 MB  engine wasm (shared by ALL maps)
+  manifests/<slug>.json           all 10 manifests
+  bo1z-wasm-host-surface.md       the 170-import porting worklist
 ```
 
-All 10 manifests are in `manifests/`, so `--offline` works without re-probing.
+Scripts: `build-index.mjs` (dedup index), `build-store.mjs` (fetch + materialise),
+`verify-store.mjs` / `verify-map.mjs` (hash checkers), `fetch-map.mjs` (single map),
+`map-space.mjs` (space accounting), `probe-*.mjs` (protocol/variant provers),
+`wasm-inventory.mjs` (import mapper).
 
-### Two bugs worth remembering (both mine, both fixed in `fetch-map.mjs`)
+## 7. Maps: all 10 mirrored in a merged store — DONE
+
+582 path references across 10 maps collapse to **347 unique blobs**:
+
+```
+8.19 GB of paths  ->  6.61 GB unique bytes   (1.58 GB saved, 19.3%)
+56 blobs are referenced by more than one map
+```
+
+How it works: the engine opens *paths*, but the bytes are what cost disk. So each map
+keeps its own real path tree under `maps/<slug>/`, and identical files are **hard links**
+into `store/<ab>/<sha256>`. Nothing is copied, so peak disk = unique bytes. `nlink` proves
+it: `iw_25.iwd` (10 maps, 21.5 MB) reports `nlink=11` — store copy plus ten map links.
+
+| Map | Paths | Logical | Map | Paths | Logical |
+|---|---|---|---|---|---|
+| five | 53 | 728.2 MB | ascension | 64 | 821.0 MB |
+| kino | 53 | 741.0 MB | cotd | 61 | 852.9 MB |
+| riese | 59 | 791.0 MB | shangrila | 60 | 867.3 MB |
+| nacht | 58 | 722.0 MB | moon | 57 | 1.14 GB |
+| verruckt | 59 | 778.9 MB | | | |
+| shinonuma | 58 | 745.0 MB | **total logical** | **582** | **8.19 GB** |
+| | | | **physical** | **347** | **6.61 GB** |
+
+Top savings: `common_zombie.ff` (79.7 MB × 7 = 478 MB), `iw_25.iwd` (21.5 MB × 10 =
+193 MB), `patch_mp.ff` (10.9 MB × 10 = 98.5 MB), `iw_00.iwd` (10.9 MB × 10 = 98.3 MB).
+
+### The trap this exposed: same path, different bytes
+
+**53 paths appear in multiple maps with DIFFERENT content.** Every `main/iw_*.iwd` has up
+to 10 distinct versions — `main/iw_01.iwd` alone has ten, from 16.5 MB to 22.1 MB. So
+content must be keyed by **sha256, never by path**. Any layout that assumes a path means
+the same bytes will silently serve the wrong map's data. The store is content-addressed
+precisely because of this.
+
+### Three bugs worth remembering (all mine, all fixed)
 
 1. **Chunking follows `f.br`, not file size.** A file with an `br` array is served as
    identity chunks via `?part=k`; a file *without* `br` is one raw response. Kino's
-   `zone/Common/common_zombie.ff` is 51.3 MB with no `br`, so a size-based heuristic
-   invented 7 phantom parts and 404'd. Every other large file happened to have `br`,
-   which hid this until the second map.
-2. **Sibling-mirror reuse.** 10+ paths are byte-identical across maps
-   (`common_zombie.ff`, `patch.ff`, `iw_25.iwd`, `localization.txt`, ...), so
-   `fetch-map.mjs` now reuses a matching copy from another `pack-*/files` tree — but only
-   after the sha256 matches the current map's manifest. Never assumed from the path.
+   `common_zombie.ff` is 51.3 MB with no `br`, so a size-based heuristic invented 7
+   phantom parts and 404'd. Every other large file happened to have `br`, hiding it.
+2. **`?part=k` vs `.br/<k>`.** The parts are stored with `Content-Encoding: br`, so `fetch`
+   decodes them — the body is already one plain 8 MiB identity chunk. Brotli-decompressing
+   it again is wrong. `.br/<k>` is the raw-Brotli variant.
+3. **The opus/fallback dual encoding.** 11 entries per map ship two encodings of the same
+   file; `<path>?part=k` serves the *fallback*, while the primary lives at `.kop?part=k`
+   (Opus) or `.dxs?part=k`. Chunking must match the variant received, or parts are read at
+   wrong offsets. The fallback is also ~181 MB smaller for `sounds.pack`.
 
 ## 8. Open technical risk: AOT + shared memory
 

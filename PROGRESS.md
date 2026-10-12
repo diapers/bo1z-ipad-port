@@ -23,7 +23,32 @@ game packs bundled inside. Keep this file current; it is the hand-off document.
 ## Reference material
 - `web-src/pretty/*.js` — de-minified site code (KisakBlack-web.mjs is the spec for every import).
 - `web-src/imports.tsv`, `web-src/exports.tsv` — wasm signatures (`tools/wasm-sigs.mjs`).
-- `pack-five/`, `pack-kino/` — verified game data. `inject-assets.mjs` puts them in an IPA.
+- Game data: **merged store on E:** (see below). `inject-assets.mjs` reads it and puts maps in an IPA.
+
+## Asset store (2026-10-12) — all 10 maps, deduplicated
+```
+E:\bo1z\store\<ab>\<sha256>   347 unique blobs, 6.61 GB — every byte stored once
+E:\bo1z\maps\<slug>\...       10 maps, own engine path tree, HARD LINKS into the store
+index/share-index.json        blob index: hash -> size -> referencing maps
+```
+582 path references collapse to 347 unique blobs (8.19 GB logical -> 6.61 GB physical,
+1.58 GB saved). Each map keeps real engine paths; identical files are hard links, so peak
+disk = unique bytes. `nlink` proves sharing (`iw_25.iwd` = 10 maps, `nlink=11`).
+
+Rebuild/refresh: `node build-index.mjs` then `node build-store.mjs --root=E:/bo1z`.
+Verify: `node verify-store.mjs E:/bo1z` (347 blobs + 582 links, all hashed).
+
+**Do not key content by path.** 53 paths appear in several maps with *different* bytes
+(`main/iw_01.iwd` has 10 distinct versions), so content is addressed by **sha256 only**.
+
+**The old `pack-five/` / `pack-kino/` dirs on C: are gone** (deleted 2026-10-12 to free
+C:, which was down to 3.7 GB). Everything now comes from the E: store. `host/target/debug/
+game/{five,kino}` junctions were repointed to `E:\bo1z\maps\<slug>`, and `inject-assets.mjs`
+resolves via `--store` (default `E:/bo1z/maps`) with a legacy `pack-<slug>/files` fallback.
+
+Caveat: the store lives on E:, so builds depend on E: being present. If E: is unavailable,
+re-fetch with `node build-store.mjs --root=<other drive>` (resumable, hash-verified).
+
 
 ## Status
 | Piece | File | State |
@@ -120,3 +145,20 @@ Build 4 runs on the iPad (Five playable). Issues from the screen recording + use
 - Debug: BO1Z_FAKEPAD="t:Btn;t:ly=1;..." scripted pad, BO1Z_SHOT_AT="seconds" screenshots.
 - PC check: in-game 51-58 fps steady (debug JIT build), keyboard hints without a pad.
   iOS-only code (UIKit overlay, GameController productCategory) verified against crate sources only.
+
+## 2026-10-12: all 10 maps, map selector, store-based IPA
+- Project moved to D:\bo1z\dddd; data in D:\bo1z\maps (per-map trees, hard links) + D:\bo1z\store
+  (content-addressed, each unique file once). The move had dropped ios/, manifests/, tools/,
+  src/main.rs: restored from git.
+- fs.rs: mounts are `MountSrc::Dir` (dev: --game D:/bo1z/maps) or `MountSrc::Index` (IPA:
+  game/maps/<slug>.json = [[path, sha256, size]], blobs in game/store/<ab>/<sha>). Case-insensitive.
+- maps.rs: catalog in the site's menu order (kino first). menu.rs: launch-time selector, nothing
+  loads until a map is picked. Uses the site's MISSION SELECT art (mapselect-*.webp from
+  C:\Users\mirac\Desktop\dddd\mapselect, copied to D:\bo1z\maps\menu; landing.js layout: rows
+  450x40 at x352 y259 pitch 42, panel 750x720 at 850,240 on a 1920x1080 stage). iOS: UIImageViews;
+  desktop: GL blits. Falls back to plain tiles without art. `--map <slug>` skips the menu.
+- emval: Kino's shader bundle needs Object.keys(...).sort() -> JS array methods (sort/reverse in
+  place, join, slice, Object.values/entries).
+- Desktop: game menus (pause) release the mouse and get an absolute cursor; re-locked on close.
+- package-ipa.mjs: CI IPA + engine + store blobs (hard-linked staging in D:\bo1z\tmp-ipa) + per-map
+  indexes + menu art -> D:\bo1z\BO1Z-all.ipa.

@@ -14,6 +14,8 @@ mod imports;
 mod input;
 mod loading;
 mod log;
+mod maps;
+mod menu;
 mod mem;
 mod platform;
 mod rt;
@@ -23,28 +25,13 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
 
-/// (slug, zone) from maps.js; "five" is the site's first map and lives at the pack root.
-const MAPS: &[(&str, &str)] = &[
-    ("five", "zombie_pentagon"),
-    ("kino", "zombie_theater"),
-    ("riese", "zombie_cod5_factory"),
-    ("nacht", "zombie_cod5_prototype"),
-    ("verruckt", "zombie_cod5_asylum"),
-    ("shinonuma", "zombie_cod5_sumpf"),
-    ("ascension", "zombie_cosmodrome"),
-    ("cotd", "zombie_coast"),
-    ("shangrila", "zombie_temple"),
-    ("moon", "zombie_moon"),
-];
-
 struct Options {
-    map: String,
+    /// `--map <slug>` skips the selector.
+    map: Option<String>,
     game: PathBuf,
     wasm: PathBuf,
     egl: PathBuf,
     data: PathBuf,
-    width: i32,
-    height: i32,
 }
 
 fn exe_dir() -> PathBuf {
@@ -78,12 +65,6 @@ fn options() -> Result<Options> {
     let game = game
         .or_else(|| first_existing(&[dir.join("game"), dir.join("../../../game")]))
         .ok_or_else(|| anyhow!("no game/ folder next to the executable (use --game)"))?;
-    // Map: --map, else Documents/map.txt, else the first pack present.
-    let map = map
-        .or_else(|| std::fs::read_to_string(data.join("map.txt")).ok().map(|s| s.trim().to_string()))
-        .filter(|m| game.join(m).is_dir())
-        .or_else(|| MAPS.iter().map(|m| m.0.to_string()).find(|m| game.join(m).is_dir()))
-        .ok_or_else(|| anyhow!("no map packs in {}", game.display()))?;
     let wasm = wasm
         .or_else(|| {
             first_existing(&[
@@ -100,12 +81,12 @@ fn options() -> Result<Options> {
     let egl_default = dir.join("libEGL.dll");
     #[cfg(not(any(windows, target_os = "ios")))]
     let egl_default = PathBuf::from("libEGL.so");
-    Ok(Options { map, game, wasm, egl: egl.unwrap_or(egl_default), data, width: 1600, height: 900 })
+    Ok(Options { map, game, wasm, egl: egl.unwrap_or(egl_default), data })
 }
 
 /// engine.js fiveArguments + the settings start() splices in, for the WebGL2 route with
 /// all rendering on the main pthread (the Firefox route: r_smp_backend 0).
-fn engine_args(o: &Options, zone: &str, opfs_root: &str) -> Vec<String> {
+fn engine_args(size: (i32, i32), zone: &str, opfs_root: &str) -> Vec<String> {
     let mut a: Vec<String> = [
         "+set", "fs_b", opfs_root,
         "+set", "fs_h", "/opfs/user",
@@ -126,7 +107,7 @@ fn engine_args(o: &Options, zone: &str, opfs_root: &str) -> Vec<String> {
     .collect();
     a.extend(["+set".into(), "snd_softwaretable".into(), format!("{opfs_root}/web/sound")]);
     a.extend(["+set", "r_smp_backend", "0", "+set", "sensitivity", "5", "+set", "snd_menu_master", "0.8"].map(String::from));
-    a.extend(["+set".into(), "r_customMode".into(), format!("{}x{}", o.width, o.height)]);
+    a.extend(["+set".into(), "r_customMode".into(), format!("{}x{}", size.0, size.1)]);
     a.extend(input::startup_args());
     a.extend(["+devmap".into(), zone.into()]);
     a
@@ -188,22 +169,43 @@ fn main() {
     }
 }
 
+/// Turns a chosen map into everything the engine needs to boot.
+pub struct Launcher {
+    game: PathBuf,
+    wasm: PathBuf,
+    data: PathBuf,
+}
+
+impl Launcher {
+    pub fn boot(&self, m: &maps::MapInfo, size: (i32, i32)) -> Result<rt::Boot> {
+        log::info(&format!("map {} ({}); game {}; wasm {}", m.slug, m.zone, self.game.display(), self.wasm.display()));
+        let (mount, ff_bytes) = m.mount(&self.game)?;
+        loading::init(ff_bytes, m.zone);
+        let _ = std::fs::write(self.data.join("map.txt"), m.slug);
+        // maps.js: Five lives in OPFS "pack", every other map in "pack-<slug>".
+        let opfs_dir = if m.slug == "five" { "pack".to_string() } else { format!("pack-{}", m.slug) };
+        let opfs_root = format!("/opfs/{opfs_dir}/files");
+        let paths = rt::Paths { opfs_root: self.data.join("opfs"), mounts: vec![(format!("{opfs_dir}/files"), mount)] };
+        // The module is compiled on the browser-main thread after the window is up, so the UI
+        // thread finishes launching quickly (iOS kills apps that take too long to launch).
+        Ok(rt::Boot { wasm: self.wasm.clone(), args: engine_args(size, m.zone, &opfs_root), paths })
+    }
+}
+
 fn run() -> Result<()> {
     let o = options()?;
-    let (slug, zone) = MAPS.iter().find(|m| m.0 == o.map).copied().ok_or_else(|| anyhow!("unknown map {}", o.map))?;
-    log::info(&format!("map {slug} ({zone}); packs {}; wasm {}", o.game.display(), o.wasm.display()));
-    loading::init(&o.game.join(slug), zone);
-
-    // maps.js: Five lives in OPFS "pack", every other map in "pack-<slug>".
-    let opfs_dir = if slug == "five" { "pack".to_string() } else { format!("pack-{slug}") };
-    let opfs_root = format!("/opfs/{opfs_dir}/files");
-    let paths = rt::Paths {
-        opfs_root: o.data.join("opfs"),
-        mounts: vec![(format!("{opfs_dir}/files"), o.game.join(slug))],
+    let found = maps::discover(&o.game);
+    if found.is_empty() {
+        return Err(anyhow!("no maps in {}", o.game.display()));
+    }
+    log::info(&format!("maps available: {}", found.iter().map(|m| m.slug).collect::<Vec<_>>().join(" ")));
+    let direct = match &o.map {
+        Some(slug) => Some(found.iter().find(|m| m.slug == slug).cloned().ok_or_else(|| anyhow!("map {slug} not found"))?),
+        None => None,
     };
-    // The module is compiled on the browser-main thread after the window is up, so the UI
-    // thread finishes launching quickly (iOS kills apps that take too long to launch).
-    let boot = rt::Boot { wasm: o.wasm.clone(), args: engine_args(&o, zone, &opfs_root), paths };
-    let mut app = platform::App::new(o.egl.clone(), boot);
+    let last = std::fs::read_to_string(o.data.join("map.txt")).ok().map(|s| s.trim().to_string());
+    let menu = menu::Menu::new(found, last.as_deref(), &o.game.join("menu"));
+    let launcher = Launcher { game: o.game.clone(), wasm: o.wasm.clone(), data: o.data.clone() };
+    let mut app = platform::App::new(o.egl.clone(), launcher, menu, direct);
     platform::run(&mut app)
 }

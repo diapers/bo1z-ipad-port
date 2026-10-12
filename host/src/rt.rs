@@ -233,8 +233,8 @@ pub fn table_func<P: WasmParams, R: WasmResults>(
 pub struct Paths {
     /// Directory that plays the role of navigator.storage.getDirectory().
     pub opfs_root: std::path::PathBuf,
-    /// Virtual OPFS path -> real directory (e.g. "pack/files" -> <bundle>/game/five).
-    pub mounts: Vec<(String, std::path::PathBuf)>,
+    /// Virtual OPFS path -> read-only map files (e.g. "pack/files" -> Five's tree).
+    pub mounts: Vec<(String, crate::fs::MountSrc)>,
 }
 
 pub struct Rt {
