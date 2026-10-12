@@ -56,6 +56,22 @@ pub fn create(lib: &Path, window: *mut std::ffi::c_void) -> Result<()> {
     let surface = unsafe { egl.create_window_surface(display, config, window as egl::NativeWindowType, None)? };
     let ctx_attrs = [egl::CONTEXT_MAJOR_VERSION, 3, egl::CONTEXT_MINOR_VERSION, 0, egl::NONE];
     let context = egl.create_context(display, config, None, &ctx_attrs)?;
+    // Paint the window black right away: the engine draws nothing until its core
+    // fastfiles are loaded, and an untouched surface shows as white.
+    egl.make_current(display, Some(surface), Some(surface), Some(context))?;
+    if let Some(clear_color) = egl.get_proc_address("glClearColor") {
+        let clear = egl.get_proc_address("glClear");
+        unsafe {
+            let cc: extern "system" fn(f32, f32, f32, f32) = std::mem::transmute(clear_color);
+            cc(0.0, 0.0, 0.0, 1.0);
+            if let Some(c) = clear {
+                let c: extern "system" fn(u32) = std::mem::transmute(c);
+                c(0x4000);
+            }
+        }
+    }
+    let _ = egl.swap_buffers(display, surface);
+    egl.make_current(display, None, None, None)?;
     CTX.set(Ctx { egl, display, surface, context }).map_err(|_| anyhow!("EGL context created twice"))?;
     Ok(())
 }
