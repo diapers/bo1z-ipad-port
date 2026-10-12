@@ -1,0 +1,266 @@
+# BO1Z wasm host-surface inventory
+
+module: KisakBlack-web.wasm (9.62 MB)
+imported funcs: 170   GL/GPU: 75   other: 95
+exports: 73   memory: {"mod":"env","name":"memory","kind":"memory","shared":true,"min":32767,"max":32767}
+
+## Graphics / GPU imports (75) - must be served by a native GL or wgpu layer
+BeginWebGPUReadbackJS
+FinishWebGPUReadbackJS
+RegisterWebGPUContext
+RegisterWebGPUShaderJS
+SetWebGPUProgramJS
+SetWebGPUReadyTableJS
+WebGPUPendingPipelinesJS
+WebGPUReadbackStateJS
+__asyncjs__InitializeWebGPU
+__asyncjs__ReadWebGPUPixelsJS
+emscripten_webgl_create_context
+emscripten_webgl_enable_extension
+emscripten_webgl_get_context_attributes
+emscripten_webgl_get_current_context
+emscripten_webgl_get_drawing_buffer_size
+emscripten_webgl_make_context_current
+emwgpuDelete
+emwgpuDeviceDestroy
+glAttachShader
+glBeginQuery
+glBindFramebuffer
+glBlitFramebuffer
+glBufferData
+glBufferSubData
+glCheckFramebufferStatus
+glClearBufferfi
+glClearBufferfv
+glClearBufferiv
+glCompileShader
+glCompressedTexSubImage2D
+glCreateProgram
+glCreateShader
+glDeleteBuffers
+glDeleteFramebuffers
+glDeleteProgram
+glDeleteQueries
+glDeleteSamplers
+glDeleteShader
+glDeleteTextures
+glDeleteVertexArrays
+glDrawBuffers
+glEndQuery
+glFramebufferTexture2D
+glGenBuffers
+glGenFramebuffers
+glGenQueries
+glGenSamplers
+glGenTextures
+glGenVertexArrays
+glGetAttribLocation
+glGetBooleanv
+glGetError
+glGetFloatv
+glGetFramebufferAttachmentParameteriv
+glGetIntegerv
+glGetProgramInfoLog
+glGetProgramiv
+glGetQueryObjectuiv
+glGetUniformBlockIndex
+glGetUniformLocation
+glIsEnabled
+glLinkProgram
+glPixelStorei
+glReadBuffer
+glReadPixels
+glShaderSource
+glTexParameteri
+glTexStorage2D
+glTexStorage3D
+glTexSubImage2D
+glTexSubImage3D
+glUniform1iv
+glUniform4fv
+glUniform4iv
+glUniformBlockBinding
+
+## Non-graphics imports by category (95)
+
+### filesystem (31)
+_wasmfs_copy_preloaded_file_data
+_wasmfs_get_num_preloaded_dirs
+_wasmfs_get_num_preloaded_files
+_wasmfs_get_preloaded_child_path
+_wasmfs_get_preloaded_file_mode
+_wasmfs_get_preloaded_file_size
+_wasmfs_get_preloaded_parent_path
+_wasmfs_get_preloaded_path_name
+_wasmfs_opfs_close_access
+_wasmfs_opfs_close_blob
+_wasmfs_opfs_flush_access
+_wasmfs_opfs_free_directory
+_wasmfs_opfs_free_file
+_wasmfs_opfs_get_child
+_wasmfs_opfs_get_entries
+_wasmfs_opfs_get_size_access
+_wasmfs_opfs_get_size_blob
+_wasmfs_opfs_get_size_file
+_wasmfs_opfs_init_root_directory
+_wasmfs_opfs_insert_directory
+_wasmfs_opfs_insert_file
+_wasmfs_opfs_move_file
+_wasmfs_opfs_open_access
+_wasmfs_opfs_open_blob
+_wasmfs_opfs_read_access
+_wasmfs_opfs_read_blob
+_wasmfs_opfs_remove_child
+_wasmfs_opfs_set_size_access
+_wasmfs_opfs_set_size_file
+_wasmfs_opfs_write_access
+_wasmfs_stdin_get_char
+
+### JS/embind bridge (21)
+_embind_register_bigint
+_embind_register_bool
+_embind_register_emval
+_embind_register_float
+_embind_register_integer
+_embind_register_memory_view
+_embind_register_std_string
+_embind_register_std_wstring
+_embind_register_void
+_emval_create_invoker
+_emval_decref
+_emval_get_global
+_emval_get_property
+_emval_incref
+_emval_invoke
+_emval_new_cstring
+_emval_run_destructors
+_emval_typeof
+emscripten_asm_const_async_on_main_thread
+emscripten_asm_const_int
+emscripten_asm_const_int_sync_on_main_thread
+
+### other (21)
+ExecuteGLPackets
+UnwatchD3DContext
+WatchD3DContext
+__assert_fail
+__call_sighandler
+_emscripten_notify_mailbox_postmessage
+_tzset_js
+emscripten_check_blocking_allowed
+emscripten_get_callstack
+emscripten_get_heap_max
+emscripten_is_webgl_context_lost
+emscripten_resize_heap
+emscripten_return_address
+emscripten_set_canvas_element_size
+emscripten_set_main_loop_arg
+emscripten_set_main_loop_timing
+emscripten_unwind_to_js_event_loop
+environ_get
+environ_sizes_get
+random_get
+wgpuDeviceHasFeature
+
+### time (8)
+_emscripten_runtime_keepalive_clear
+_gmtime_js
+_localtime_js
+_timegm_js
+clock_time_get
+emscripten_date_now
+emscripten_get_now
+emscripten_runtime_keepalive_check
+
+### logging/exit (7)
+_abort_js
+emscripten_console_error
+emscripten_err
+emscripten_exit_with_live_runtime
+emscripten_out
+exit
+proc_exit
+
+### threads (7)
+__pthread_create_js
+_emscripten_init_main_thread_js
+_emscripten_receive_on_main_thread_js
+_emscripten_thread_cleanup
+_emscripten_thread_mailbox_await
+_emscripten_thread_set_strongref
+_wasmfs_thread_utils_heartbeat
+
+## Exports (73)
+func	__wasm_call_ctors
+func	__getTypeName
+func	_embind_initialize_bindings
+table	__indirect_function_table
+func	malloc
+func	free
+func	pthread_self
+func	emscripten_proxy_execute_queue
+func	KB_RegisterVideo
+func	KB_PresentRing
+func	KB_WaitMemoryStats
+func	KB_VirtualMemoryStats
+func	KB_MemoryStats
+func	__main_argc_argv
+func	KB_UIState
+func	KB_Input
+func	KB_AudioRead
+func	KB_AudioRing
+func	KB_AudioQueued
+func	KB_AudioMemoryStats
+func	KB_AudioDropped
+func	KB_AudioTrace
+func	KB_FrameProfileMode
+func	KB_DrawMerge
+func	KB_FrameTraceMode
+func	KB_SetProgramManifest
+func	KB_WebResourceStats
+func	KB_StreamBudget
+func	KB_EngineAllocStats
+func	KB_PackExpect
+func	KB_PackReady
+func	KB_PackReleaseAll
+func	emwgpuCreateBindGroup
+func	emwgpuCreateBindGroupLayout
+func	emwgpuCreateCommandBuffer
+func	emwgpuCreateCommandEncoder
+func	emwgpuCreateComputePassEncoder
+func	emwgpuCreateComputePipeline
+func	emwgpuCreateExternalTexture
+func	emwgpuCreatePipelineLayout
+func	emwgpuCreateQuerySet
+func	emwgpuCreateRenderBundle
+func	emwgpuCreateRenderBundleEncoder
+func	emwgpuCreateRenderPassEncoder
+func	emwgpuCreateRenderPipeline
+func	emwgpuCreateSampler
+func	emwgpuCreateSurface
+func	emwgpuCreateTexture
+func	emwgpuCreateTextureView
+func	emwgpuCreateAdapter
+func	emwgpuImportBuffer
+func	emwgpuCreateDevice
+func	emwgpuCreateQueue
+func	emwgpuCreateShaderModule
+func	_emscripten_tls_init
+func	_emscripten_proxy_main
+func	_emscripten_set_offscreencanvas_size_on_thread
+func	__funcs_on_exit
+func	_emscripten_thread_init
+func	__set_thread_state
+func	_emscripten_thread_crashed
+func	emscripten_proxy_finish
+func	_emscripten_run_js_on_main_thread_done
+func	_emscripten_run_js_on_main_thread
+func	_emscripten_thread_free_data
+func	_emscripten_thread_exit
+func	_emscripten_check_mailbox
+func	__trap
+func	emscripten_stack_set_limits
+func	_emscripten_stack_restore
+func	_emscripten_stack_alloc
+func	emscripten_stack_get_current
+func	_wasmfs_opfs_record_entry

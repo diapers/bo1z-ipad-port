@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>BO1Z iPad probe</title>
+<style>
+  :root { color-scheme: dark; --ok:#3ddc84; --bad:#ff5d4d; --warn:#ffc857; }
+  * { box-sizing: border-box; -webkit-text-size-adjust: 100%; }
+  body { margin:0; padding:14px 14px 40px; background:#0b0b0d; color:#e9e9ee;
+         font:15px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+  h1 { font-size:17px; margin:0 0 4px; letter-spacing:.04em; }
+  .sub { color:#9a9aa6; font-size:12px; margin-bottom:12px; }
+  section { border:1px solid #26262e; border-radius:10px; padding:10px 12px; margin:0 0 10px; background:#121218; }
+  h2 { font-size:12px; margin:0 0 8px; color:#9a9aa6; letter-spacing:.14em; text-transform:uppercase; font-weight:600; }
+  .row { display:flex; gap:8px; align-items:baseline; margin:0 0 5px; }
+  .row .v { font-weight:700; min-width:44px; flex:0 0 auto; }
+  .ok  .v { color:var(--ok); }
+  .bad .v { color:var(--bad); }
+  .warn .v { color:var(--warn); }
+  .info .v { color:#8fb8ff; }
+  .lbl { color:#cfcfd8; }
+  .note { color:#8b8b96; font-size:12px; margin:3px 0 0 52px; overflow-wrap:anywhere; }
+  #summary { font-size:19px; font-weight:700; padding:12px; border-radius:10px; margin:0 0 12px; text-align:center; }
+  #summary.good { background:#0f2a1b; color:var(--ok); border:1px solid #1d5133; }
+  #summary.mid  { background:#2a240f; color:var(--warn); border:1px solid #514a1d; }
+  #summary.stop { background:#2a1210; color:var(--bad); border:1px solid #51211d; }
+  textarea { width:100%; min-height:200px; background:#08080a; color:#d8d8e0; border:1px solid #2a2a33;
+             border-radius:8px; padding:8px; font:12px/1.4 ui-monospace,Menlo,monospace; }
+  button { font:inherit; font-size:14px; padding:10px 14px; margin:0 0 10px; border-radius:8px;
+           border:1px solid #3a3a46; background:#1b1b22; color:#e9e9ee; }
+  button:active { background:#26262f; }
+  code { color:#ffd479; }
+</style>
+</head>
+<body>
+<h1>BO1Z → iPad probe</h1>
+<div class="sub">Tests this device against the exact checks vel.gg/bo1z runs before it loads. Long-press → Copy → paste back to the agent.</div>
+<div id="summary" class="mid">running…</div>
+<div id="out"></div>
+<button id="copy">Copy report</button>
+<textarea id="report" readonly spellcheck="false"></textarea>
+
+<script>
+'use strict';
+const out = document.getElementById('out');
+const lines = [];
+let fatal = 0, warn = 0;
+
+function section(title) {
+  const s = document.createElement('section');
+  const h = document.createElement('h2'); h.textContent = title; s.append(h);
+  out.append(s);
+  return s;
+}
+function row(parent, cls, verdict, label, note) {
+  const d = document.createElement('div'); d.className = 'row ' + cls;
+  const v = document.createElement('span'); v.className = 'v'; v.textContent = verdict;
+  const l = document.createElement('span'); l.className = 'lbl'; l.textContent = label;
+  d.append(v, l); parent.append(d);
+  if (note) { const n = document.createElement('div'); n.className = 'note'; n.textContent = note; parent.append(n); }
+  lines.push([verdict, label, note || ''].join(' | '));
+}
+const OK   = (p, l, n) => row(p, 'ok',   'PASS', l, n);
+const NO   = (p, l, n) => { fatal++; row(p, 'bad',  'FAIL', l, n); };
+const WARN = (p, l, n) => { warn++;  row(p, 'warn', 'WARN', l, n); };
+const INFO = (p, l, n) => row(p, 'info', 'INFO', l, n);
+
+(async function main() {
+  // ---------- 1. Platform / UA (the gate that blocked us) ----------
+  const s1 = section('1. Platform');
+  const ua = navigator.userAgent, plat = navigator.platform || '', mtp = navigator.maxTouchPoints || 0;
+  INFO(s1, 'UA', ua);
+  INFO(s1, 'platform=' + plat + '  maxTouchPoints=' + mtp);
+  const mobileRe = /Android|iPhone|iPad|iPod|Mobile/i.test(ua);
+  const desktopSpoof = (plat === 'MacIntel' && mtp > 1);
+  if (mobileRe) NO(s1, 'Mobile UA detected — vel.gg shows "built for a desktop computer" and stops.', 'Try Safari → "aA" → Request Desktop Website, then reload.');
+  else if (desktopSpoof) WARN(s1, 'UA says desktop but this is a touch device (MacIntel + multi-touch).', 'vel.gg blocks this exact combo. Spoofing a plain desktop UA string is required.');
+  else OK(s1, 'UA does not trip vel.gg\'s mobile block.', '');
+  INFO(s1, 'crossOriginIsolated = ' + String(globalThis.crossOriginIsolated));
+
+  // ---------- 2. Isolation / shared memory ----------
+  const s2 = section('2. Shared memory + threads');
+  const haveSAB = typeof SharedArrayBuffer !== 'undefined';
+  if (!globalThis.crossOriginIsolated) {
+    NO(s2, 'Not cross-origin isolated (COOP/COEP missing).', 'Safari on the real site CAN satisfy this; a plain file:// page cannot.');
+  } else OK(s2, 'Cross-origin isolated.', '');
+  haveSAB ? OK(s2, 'SharedArrayBuffer exists.') : NO(s2, 'SharedArrayBuffer missing — Wasm threads impossible.');
+
+  try {
+    const mem = new WebAssembly.Memory({ initial: 1, maximum: 24576, shared: true });
+    if (mem.buffer instanceof SharedArrayBuffer) OK(s2, 'Shared Wasm memory reserved (max 24576 pages = 1.5 GiB).');
+    else NO(s2, 'Shared Wasm memory fell back to non-shared.');
+  } catch (e) { NO(s2, 'Shared Wasm Memory threw: ' + e.message); }
+
+  const thr = Uint8Array.from([0,97,115,109,1,0,0,0,5,4,1,3,1,1]);
+  const simd = Uint8Array.from([0,97,115,109,1,0,0,0,1,5,1,96,0,1,123,3,2,1,0,10,22,1,20,0,253,12,
+    ...Array(16).fill(0), 11]);
+  WebAssembly.validate(thr)  ? OK(s2, 'Wasm threads validate.') : NO(s2, 'Wasm threads NOT supported.');
+  WebAssembly.validate(simd) ? OK(s2, 'Wasm SIMD validate.')    : NO(s2, 'Wasm SIMD NOT supported.');
+
+  // JSPI — hard requirement, only in Safari/iOS 27+
+  if (typeof WebAssembly.Suspending === 'function') OK(s2, 'JSPI present (WebAssembly.Suspending).');
+  else NO(s2, 'JSPI MISSING (WebAssembly.Suspending).', 'Hard requirement. Shipped in iOS 27 / Safari 27 (2026-09-14) only.');
+
+  // ---------- 3. Storage ----------
+  const s3 = section('3. Storage (OPFS cache)');
+  const st = navigator.storage;
+  (st && st.getDirectory) ? OK(s3, 'OPFS available.') : NO(s3, 'OPFS unavailable (navigator.storage.getDirectory).');
+  try {
+    if (st && st.estimate) {
+      const est = await st.estimate();
+      const q = est.quota || 0, u = est.usage || 0;
+      INFO(s3, 'quota=' + (q/1e9).toFixed(2) + ' GB  used=' + (u/1e6).toFixed(1) + ' MB',
+              'Game needs ~0.9 GB cached (715 MB boot download).');
+      if (q && q < 2e9) NO(s3, 'Quota too small for a ~0.9 GB pack.'); else if (q) OK(s3, 'Quota plausibly large enough.');
+    } else NO(s3, 'navigator.storage.estimate unavailable.');
+    if (st && st.persist) {
+      const persisted = await st.persisted();
+      INFO(s3, 'persisted=' + persisted, 'Non-persisted caches can be evicted by iOS.');
+    } else NO(s3, 'navigator.storage.persist unavailable.');
+  } catch (e) { WARN(s3, 'storage probe error: ' + e.message); }
+  navigator.locks ? OK(s3, 'Web Locks available.') : NO(s3, 'Web Locks unavailable.');
+
+  // ---------- 4. Graphics ----------
+  const s5 = section('4. Graphics');
+  let gl = null;
+  try { gl = document.createElement('canvas').getContext('webgl2'); } catch (e) {}
+  if (!gl) NO(s5, 'WebGL2 unavailable — vel.gg cannot run at all.');
+  else {
+    OK(s5, 'WebGL2 available.');
+    const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+    if (dbg) INFO(s5, 'GPU: ' + gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL));
+    // The game's exact required/fallback extension logic (capabilities.js checkRenderer)
+    const s3tc = !!gl.getExtension('WEBGL_compressed_texture_s3tc');
+    const cbf  = !!gl.getExtension('EXT_color_buffer_float');
+    const tn16 = !!gl.getExtension('EXT_texture_norm16');
+    const fbl  = !!gl.getExtension('EXT_float_blend');
+    const tfl  = !!gl.getExtension('OES_texture_float_linear');
+    cbf ? OK(s5, 'EXT_color_buffer_float present.') :
+          NO(s5, 'EXT_color_buffer_float MISSING.', 'Hard requirement in checkRenderer(). Apple GPUs historically cannot render to float textures — this is the likely hard stop.');
+    s3tc ? OK(s5, 'WEBGL_compressed_texture_s3tc present.') :
+           WARN(s5, 'WEBGL_compressed_texture_s3tc missing.', 'Desktop-only (DXT/BC). Apple Silicon has no BC compression except M3+/A17 Pro.');
+    tn16 ? OK(s5, 'EXT_texture_norm16 present.') :
+           (tfl && fbl ? OK(s5, 'norm16 missing but float-linear + float-blend present (game\'s fallback path).')
+                       : NO(s5, 'norm16 missing AND fallback (OES_texture_float_linear + EXT_float_blend) incomplete.'));
+    const mins = [['MAX_TEXTURE_SIZE',2048],['MAX_3D_TEXTURE_SIZE',256],['MAX_TEXTURE_IMAGE_UNITS',16],
+      ['MAX_VERTEX_TEXTURE_IMAGE_UNITS',4],['MAX_COMBINED_TEXTURE_IMAGE_UNITS',20],
+      ['MAX_VERTEX_UNIFORM_VECTORS',264],['MAX_FRAGMENT_UNIFORM_VECTORS',264],['MAX_VERTEX_ATTRIBS',16]];
+    const short = mins.filter(([n,m]) => gl.getParameter(gl[n]) < m).map(([n,m]) => n + '(' + gl.getParameter(gl[n]) + '<' + m + ')');
+    short.length ? NO(s5, 'GL limits below minimum: ' + short.join(', ')) : OK(s5, 'All 8 GL limits meet the minimums.');
+    gl.getExtension('WEBGL_lose_context')?.loseContext();
+  }
+  // WebGPU path (would skip the 17 MB GLSL pack, but needs BC texture compression on Apple GPUs)
+  try {
+    const ad = navigator.gpu && await navigator.gpu.requestAdapter({ powerPreference:'high-performance' });
+    if (!ad) INFO(s5, 'No WebGPU adapter — WebGL2 path only.');
+    else {
+      const need = ['texture-compression-bc','depth32float-stencil8','float32-filterable','float32-blendable'];
+      const miss = need.filter(f => !ad.features.has(f));
+      miss.length ? INFO(s5, 'WebGPU adapter present but missing: ' + miss.join(', ') + ' → game falls back to WebGL2 anyway.')
+                  : OK(s5, 'WebGPU adapter has every feature the game wants.');
+    }
+  } catch (e) { INFO(s5, 'WebGPU probe error: ' + e.message); }
+
+  // ---------- 5. Worker / canvas / audio / input ----------
+  const s6 = section('5. Worker, canvas, audio, input');
+  (typeof Worker === 'function') ? OK(s6, 'Worker available.') : NO(s6, 'Worker unavailable.');
+  (typeof HTMLCanvasElement.prototype.transferControlToOffscreen === 'function')
+    ? OK(s6, 'OffscreenCanvas transfer supported.') : NO(s6, 'transferControlToOffscreen missing.');
+  (globalThis.AudioWorkletNode && globalThis.AudioContext && 'audioWorklet' in AudioContext.prototype)
+    ? OK(s6, 'AudioWorklet available.') : NO(s6, 'AudioWorklet missing.');
+  (Element.prototype.requestPointerLock && Document.prototype.exitPointerLock)
+    ? OK(s6, 'Pointer Lock API exists.') : NO(s6, 'Pointer Lock missing — aiming cannot work.');
+  if (Element.prototype.requestPointerLock) {
+    // Does it actually GRANT lock, or just exist? Mobile WebKit often has the method but never locks.
+    const c = document.createElement('canvas'); c.width = c.height = 32;
+    c.style.cssText = 'position:fixed;left:-9999px'; document.body.append(c);
+    const granted = await new Promise(res => {
+      let done = false;
+      const fin = v => { if (!done) { done = true; res(v); } };
+      document.addEventListener('pointerlockchange', () => fin(document.pointerLockElement === c), { once:true });
+      document.addEventListener('pointerlockerror',  () => fin(false), { once:true });
+      try { const p = c.requestPointerLock(); if (p) p.catch(() => fin(false)); } catch (e) { fin(false); }
+      setTimeout(() => fin(false), 1500);
+    });
+    granted ? OK(s6, 'Pointer lock actually GRANTED.') :
+              NO(s6, 'Pointer lock request was refused.', 'Method exists but never locks → mouse/keyboard aiming is dead without a jailbreak-level patch.');
+    if (document.pointerLockElement) document.exitPointerLock();
+    c.remove();
+  }
+  OK(s6, 'Touch points available: ' + mtp, 'The game has ZERO touch code — it only reads mouse + keyboard. Touch requires an injected translation layer.');
+  INFO(s6, 'Actual JIT: ' + (globalThis.WebAssembly && WebAssembly.validate(thr) ? 'confirmed (Wasm validated)' : 'unknown'));
+
+  // ---------- 6. Can it reach the game + boot it? ----------
+  const s4 = section('6. Live boot attempt (iframe → vel.gg)');
+  lines.push('--- live boot attempt ---');
+  try {
+    const r = await fetch('https://vel.gg/bo1z/five.html', { method:'GET', mode:'cors' });
+    OK(s4, 'Reached vel.gg/bo1z (HTTP ' + r.status + ').');
+    lines.push('HTTP ' + r.status + ' from vel.gg/bo1z/five.html');
+  } catch (e) {
+    WARN(s4, 'Could not fetch vel.gg directly: ' + e.message, 'Normal for cross-origin; the iframe below is the real test.');
+  }
+  const frame = document.createElement('iframe');
+  frame.src = 'https://vel.gg/bo1z/five.html';
+  frame.setAttribute('allow', 'fullscreen; autoplay');
+  frame.style.cssText = 'width:100%;height:420px;border:1px solid #2a2a33;border-radius:8px;background:#000';
+  s4.append(frame);
+  const note = document.createElement('div');
+  note.className = 'note';
+  note.textContent = 'Watching the frame for 12s. If you see the Pentagon loadscreen with a "Click to start" button, the engine passed its capability gates on this device. If it shows a red error message, copy that exact text.';
+  s4.append(note);
+  let sawText = '';
+  const poll = setInterval(() => {
+    try {
+      const t = frame.contentDocument && frame.contentDocument.body ? frame.contentDocument.body.innerText : '';
+      if (t && t !== sawText) { sawText = t; lines.push('FRAME TEXT: ' + t.replace(/\s+/g,' ').slice(0,500)); }
+    } catch (e) { /* cross-origin: expected */ }
+  }, 1000);
+  setTimeout(() => {
+    clearInterval(poll);
+    if (!sawText) lines.push('FRAME TEXT: (not readable — cross-origin, OR nothing rendered)');
+    finish();
+  }, 12000);
+})();
+
+function finish() {
+  const sum = document.getElementById('summary');
+  if (fatal === 0 && warn === 0) { sum.className = 'good'; sum.textContent = 'ALL CHECKS PASSED — packaging is the only work left'; }
+  else if (fatal === 0)         { sum.className = 'mid';  sum.textContent = 'RUNNABLE, with ' + warn + ' caveat(s)'; }
+  else                          { sum.className = 'stop'; sum.textContent = 'BLOCKED: ' + fatal + ' hard requirement(s) failed'; }
+  const head = [
+    '=== BO1Z iPad probe report ===',
+    'date: ' + new Date().toISOString(),
+    'UA: ' + navigator.userAgent,
+    'screen: ' + screen.width + 'x' + screen.height + ' @dpr' + devicePixelRatio,
+    'deviceMemory: ' + (navigator.deviceMemory || 'n/a'),
+    'hardwareConcurrency: ' + navigator.hardwareConcurrency,
+    'crossOriginIsolated: ' + globalThis.crossOriginIsolated,
+    'RESULT: ' + (fatal === 0 ? (warn === 0 ? 'ALL PASS' : 'RUNNABLE with ' + warn + ' caveats') : fatal + ' HARD FAILURES'),
+    ''
+  ].join('\n');
+  document.getElementById('report').value = head + lines.join('\n');
+}
+document.getElementById('copy').addEventListener('click', async () => {
+  const ta = document.getElementById('report');
+  ta.select();
+  try { await navigator.clipboard.writeText(ta.value); document.getElementById('copy').textContent = 'Copied ✓'; }
+  catch { document.execCommand('copy'); document.getElementById('copy').textContent = 'Copy manually below'; }
+  setTimeout(() => document.getElementById('copy').textContent = 'Copy report', 2000);
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+[package]
+name = "bo1z-spike"
+version = "0.1.0"
+edition = "2021"
+description = "Feasibility spike: can the BO1Z web wasm run under wasmtime with shared memory, and can it be AOT-precompiled?"
+
+[dependencies]
+wasmtime = { version = "48.0.5", features = ["cranelift", "runtime", "threads", "gc", "component-model"] }
+
+[profile.release]
+opt-level = 1
+debug = false

@@ -1,0 +1,82 @@
+name: macos-spike
+
+# Runs on a GitHub-hosted macOS runner (free for PUBLIC repos).
+# Purpose = de-risk the two unknowns that decide whether BO1Z can run natively on iOS:
+#
+#   Q1. Can wasmtime serialize a module that imports a SHARED memory (AOT precompile)?
+#       Muguet's iOS strategy is AOT-precompile-at-build-time because iOS forbids JIT.
+#       Wasmtime docs: shared-memory *creation* is off by default and wasm threads are
+#       a tier-2 feature ("will not receive security updates", no CVEs). If shared
+#       memories cannot be serialized, the AOT path is closed and we must either
+#       enable JIT on the jailbroken device or use an interpreter.
+#
+#   Q2. Does the real KisakBlack-web.wasm compile under wasm_threads + exceptions?
+#
+# Only if BOTH pass is the full port worth building.
+
+on:
+  workflow_dispatch:
+    inputs:
+      wasm_url:
+        description: 'URL of the game wasm'
+        required: false
+        default: 'https://vel.gg/bo1z/artifacts/KisakBlack-web.wasm'
+  push:
+    paths:
+      - '.github/workflows/macos-spike.yml'
+      - 'src/**'
+
+jobs:
+  spike:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          uname -m
+          xcodebuild -version
+          xcrun --show-sdk-version || true
+
+      - name: Install Rust + iOS target
+        run: |
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+          . "$HOME/.cargo/env"
+          rustup target add aarch64-apple-ios
+          rustc --version
+          rustup target list --installed
+
+      - name: Fetch the game wasm
+        run: |
+          mkdir -p artifacts
+          curl -fsSL "${{ github.event.inputs.wasm_url || 'https://vel.gg/bo1z/artifacts/KisakBlack-web.wasm' }}" \
+            -o artifacts/KisakBlack-web.wasm
+          ls -la artifacts/
+          file artifacts/KisakBlack-web.wasm || true
+
+      - name: Build the spike host
+        run: |
+          . "$HOME/.cargo/env"
+          cargo build --release
+
+      - name: Run the spike (Q1 + Q2)
+        run: |
+          ./target/release/bo1z-spike artifacts/KisakBlack-web.wasm | tee spike-report.txt
+
+      - name: Verify aarch64-apple-ios cross-compilation works
+        run: |
+          . "$HOME/.cargo/env"
+          cargo build --release --target aarch64-apple-ios
+          echo "iOS cross-compile OK:"
+          ls -la target/aarch64-apple-ios/release/ | head -20
+          file target/aarch64-apple-ios/release/bo1z-spike
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: spike-report
+          path: |
+            spike-report.txt
+            artifacts/KisakBlack-ios.cwasm
+          retention-days: 5

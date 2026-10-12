@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  BO1Z app Info.plist. package.sh copies it into Payload/BO1Z.app/, fills the DT* build
+  keys and CFBundleVersion, and converts it to binary.
+
+  Deliberately ABSENT: UIApplicationSceneManifest. winit 0.30 has no UIScene support (it
+  creates its UIWindow with initWithFrame:/setScreen:), and a window with no windowScene is
+  never shown once a scene manifest is declared. Only an iOS 27+ SDK build running on
+  iOS 27+ requires scenes; our target is iOS 17.
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.local.bo1z</string>
+	<key>CFBundleName</key>
+	<string>BO1Z</string>
+	<key>CFBundleDisplayName</key>
+	<string>BO1Z</string>
+	<key>CFBundleExecutable</key>
+	<string>bo1z_host</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>CFBundleSupportedPlatforms</key>
+	<array>
+		<string>iPhoneOS</string>
+	</array>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>MinimumOSVersion</key>
+	<string>17.0</string>
+	<!-- 1 = iPhone, 2 = iPad. Without 2 the app runs in iPhone-compatibility mode on iPad. -->
+	<key>UIDeviceFamily</key>
+	<array>
+		<integer>1</integer>
+		<integer>2</integer>
+	</array>
+	<key>UIRequiredDeviceCapabilities</key>
+	<array>
+		<string>arm64</string>
+	</array>
+	<!-- Without a launch screen iOS runs the app letterboxed at a legacy resolution. -->
+	<key>UILaunchScreen</key>
+	<dict/>
+
+	<!-- Landscape only -->
+	<key>UIInterfaceOrientation</key>
+	<string>UIInterfaceOrientationLandscapeRight</string>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UIRequiresFullScreen</key>
+	<true/>
+	<key>UIStatusBarHidden</key>
+	<true/>
+	<!-- Makes UIStatusBarHidden authoritative regardless of winit's view controller. -->
+	<key>UIViewControllerBasedStatusBarAppearance</key>
+	<false/>
+	<key>UIApplicationSupportsIndirectInputEvents</key>
+	<true/>
+
+	<!-- Documents/ visible and writable from the Files app (configs, saves, logs). -->
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
+
+	<!-- Game controllers -->
+	<key>GCSupportsControllerUserInteraction</key>
+	<true/>
+	<key>GCSupportedGameControllers</key>
+	<array>
+		<dict>
+			<key>ProfileName</key>
+			<string>ExtendedGamepad</string>
+		</dict>
+	</array>
+
+	<!-- TrollStore's "enable JIT" URL scheme (apple-magnifier://enable-jit?bundle-id=...).
+	     Listing it only allows canOpenURL: checks; openURL: works without it. -->
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>apple-magnifier</string>
+	</array>
+
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+</dict>
+</plist>

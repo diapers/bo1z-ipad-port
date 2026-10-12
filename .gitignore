@@ -1,0 +1,11 @@
+# Licensed game data stays local; it is added to the IPA by inject-assets.mjs.
+pack-*/
+bo1z-wasm/
+artifacts/
+*.ipa
+target/
+host/target/
+web-src/
+tools/node/
+build/
+data/

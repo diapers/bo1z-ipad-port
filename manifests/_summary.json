@@ -1,0 +1,116 @@
+{
+ "rows": [
+  {
+   "slug": "five",
+   "zone": "zombie_pentagon",
+   "name": "Five",
+   "files": 51,
+   "disk": 717499411,
+   "wire": 410809599,
+   "streams": 10696633,
+   "fbCount": 11,
+   "version": "b96c43a4e53a8a7d7f02a353da5f612529401bf5a162b4bbdc93b13a52102949"
+  },
+  {
+   "slug": "kino",
+   "zone": "zombie_theater",
+   "name": "Kino der Toten",
+   "files": 51,
+   "disk": 736259588,
+   "wire": 429643273,
+   "streams": 4741866,
+   "fbCount": 11,
+   "version": "2bf00465b1f275401855cf0f7c9631bb59a77f91acad8736d037073d69420e16"
+  },
+  {
+   "slug": "riese",
+   "zone": "zombie_cod5_factory",
+   "name": "Der Riese",
+   "files": 57,
+   "disk": 786426827,
+   "wire": 478975198,
+   "streams": 4559971,
+   "fbCount": 15,
+   "version": "c80c5a0685e055d343a96029bb2b4c22484ba510bce93a3b4f28c4457279ef87"
+  },
+  {
+   "slug": "nacht",
+   "zone": "zombie_cod5_prototype",
+   "name": "Nacht der Untoten",
+   "files": 56,
+   "disk": 717428463,
+   "wire": 406980171,
+   "streams": 4549033,
+   "fbCount": 15,
+   "version": "74ad7dfa2fbf35d88bd37d7f5b05115ba45d4f4db8ce696a9beef89d4804ff2a"
+  },
+  {
+   "slug": "verruckt",
+   "zone": "zombie_cod5_asylum",
+   "name": "Verrückt",
+   "files": 57,
+   "disk": 774214316,
+   "wire": 438815397,
+   "streams": 4734558,
+   "fbCount": 15,
+   "version": "eea6fefb2778893c5a01410174b3bb736dea6f79d719d3c3175c0393eeb5bee7"
+  },
+  {
+   "slug": "shinonuma",
+   "zone": "zombie_cod5_sumpf",
+   "name": "Shi No Numa",
+   "files": 56,
+   "disk": 739973412,
+   "wire": 403547925,
+   "streams": 5038261,
+   "fbCount": 15,
+   "version": "11d7bc5e9d4c179f8778dce67522bbcbb042adcbd8677b72502f246693caeb57"
+  },
+  {
+   "slug": "ascension",
+   "zone": "zombie_cosmodrome",
+   "name": "Ascension",
+   "files": 62,
+   "disk": 814826530,
+   "wire": 440233117,
+   "streams": 6146435,
+   "fbCount": 16,
+   "version": "8d1dcabd4be2077e02608f9b931f4973cd19b524ff4bf40bc959c30651e537f6"
+  },
+  {
+   "slug": "cotd",
+   "zone": "zombie_coast",
+   "name": "Call of the Dead",
+   "files": 59,
+   "disk": 837738550,
+   "wire": 460909956,
+   "streams": 15175636,
+   "fbCount": 14,
+   "version": "40be07806a96c7ce33428aeb0cb2ec5374b2ed46a87b96dc33c19374b5f51bee"
+  },
+  {
+   "slug": "shangrila",
+   "zone": "zombie_temple",
+   "name": "Shangri-La",
+   "files": 58,
+   "disk": 860663181,
+   "wire": 487050598,
+   "streams": 6627105,
+   "fbCount": 15,
+   "version": "600c07f32cc57be083595caf291c076a49d93b4ea8489d7da2cf5458dff8ef2c"
+  },
+  {
+   "slug": "moon",
+   "zone": "zombie_moon",
+   "name": "Moon",
+   "files": 55,
+   "disk": 1135690573,
+   "wire": 662677772,
+   "streams": 9166131,
+   "fbCount": 14,
+   "version": "9b0788f30fe88b62772dddd19a7d5912d7d31ee4d02447aa5ebcf05ea79fd287"
+  }
+ ],
+ "totDisk": 8192156480,
+ "totWire": 4691078635
+}

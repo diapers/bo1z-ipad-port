@@ -1,0 +1,158 @@
+//! EGL (ANGLE) context: created on the OS main thread against the native window,
+//! made current on whichever engine thread owns the canvas (the main pthread).
+
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::OnceLock;
+
+use anyhow::{anyhow, Result};
+use khronos_egl as egl;
+
+use crate::log;
+
+type Egl = egl::DynamicInstance<egl::EGL1_4>;
+
+struct Ctx {
+    egl: Egl,
+    display: egl::Display,
+    surface: egl::Surface,
+    context: egl::Context,
+}
+// EGL handles are opaque pointers that EGL itself lets any thread use.
+unsafe impl Send for Ctx {}
+unsafe impl Sync for Ctx {}
+
+static CTX: OnceLock<Ctx> = OnceLock::new();
+static LOADED: AtomicBool = AtomicBool::new(false);
+static REQ_W: AtomicI32 = AtomicI32::new(0);
+static REQ_H: AtomicI32 = AtomicI32::new(0);
+
+/// Load ANGLE's libEGL from `lib_dir` (or the default search path) and create a GLES 3.0
+/// context and window surface. `window` is an HWND on Windows, a CAMetalLayer* on iOS.
+pub fn create(lib: &Path, window: *mut std::ffi::c_void) -> Result<()> {
+    let egl = unsafe { Egl::load_required_from_filename(lib) }
+        .map_err(|e| anyhow!("cannot load {}: {e}", lib.display()))?;
+    let display = unsafe { egl.get_display(egl::DEFAULT_DISPLAY) }.ok_or_else(|| anyhow!("eglGetDisplay failed"))?;
+    let (major, minor) = egl.initialize(display)?;
+    log::info(&format!(
+        "EGL {major}.{minor} vendor={} version={}",
+        egl.query_string(Some(display), egl::VENDOR).map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
+        egl.query_string(Some(display), egl::VERSION).map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
+    ));
+    egl.bind_api(egl::OPENGL_ES_API)?;
+    const OPENGL_ES3_BIT: egl::Int = 0x40;
+    let attrs = [
+        egl::RED_SIZE, 8,
+        egl::GREEN_SIZE, 8,
+        egl::BLUE_SIZE, 8,
+        egl::ALPHA_SIZE, 8,
+        egl::DEPTH_SIZE, 24,
+        egl::STENCIL_SIZE, 8,
+        egl::RENDERABLE_TYPE, OPENGL_ES3_BIT,
+        egl::SURFACE_TYPE, egl::WINDOW_BIT,
+        egl::NONE,
+    ];
+    let config = egl.choose_first_config(display, &attrs)?.ok_or_else(|| anyhow!("no RGBA8/D24S8 ES3 EGL config"))?;
+    let surface = unsafe { egl.create_window_surface(display, config, window as egl::NativeWindowType, None)? };
+    let ctx_attrs = [egl::CONTEXT_MAJOR_VERSION, 3, egl::CONTEXT_MINOR_VERSION, 0, egl::NONE];
+    let context = egl.create_context(display, config, None, &ctx_attrs)?;
+    CTX.set(Ctx { egl, display, surface, context }).map_err(|_| anyhow!("EGL context created twice"))?;
+    Ok(())
+}
+
+fn ctx() -> Result<&'static Ctx> {
+    CTX.get().ok_or_else(|| anyhow!("no EGL context"))
+}
+
+/// Make the context current on the calling thread. Returns true the first time GL
+/// function pointers were loaded.
+pub fn make_current() -> Result<bool> {
+    let c = ctx()?;
+    c.egl.make_current(c.display, Some(c.surface), Some(c.surface), Some(c.context))?;
+    c.egl.swap_interval(c.display, 1)?;
+    if LOADED.swap(true, Ordering::AcqRel) {
+        return Ok(false);
+    }
+    gl::load_with(|name| c.egl.get_proc_address(name).map_or(std::ptr::null(), |f| f as *const _));
+    unsafe {
+        let s = |e| {
+            let p = gl::GetString(e);
+            if p.is_null() { String::new() } else { std::ffi::CStr::from_ptr(p as *const _).to_string_lossy().into_owned() }
+        };
+        log::info(&format!("GL_RENDERER={} GL_VERSION={}", s(gl::RENDERER), s(gl::VERSION)));
+    }
+    Ok(true)
+}
+
+pub fn release_current() {
+    if let Ok(c) = ctx() {
+        let _ = c.egl.make_current(c.display, None, None, None);
+    }
+}
+
+pub fn swap() {
+    if let Ok(c) = ctx() {
+        if let Err(e) = c.egl.swap_buffers(c.display, c.surface) {
+            log::error(&format!("eglSwapBuffers: {e}"));
+        }
+    }
+}
+
+pub fn surface_size() -> (i32, i32) {
+    let Ok(c) = ctx() else { return (0, 0) };
+    let w = c.egl.query_surface(c.display, c.surface, egl::WIDTH).unwrap_or(0);
+    let h = c.egl.query_surface(c.display, c.surface, egl::HEIGHT).unwrap_or(0);
+    (w, h)
+}
+
+/// emscripten_set_canvas_element_size: the drawing buffer is the window surface, so
+/// only remember what the engine asked for.
+pub fn set_requested_size(w: i32, h: i32) {
+    REQ_W.store(w, Ordering::Relaxed);
+    REQ_H.store(h, Ordering::Relaxed);
+}
+
+static FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Debug: BO1Z_SHOT="600,1200" saves those presented frames as BMP into the data dir.
+pub fn before_present(data_dir: &Path) {
+    let n = FRAME.fetch_add(1, Ordering::Relaxed) + 1;
+    let Ok(spec) = std::env::var("BO1Z_SHOT") else { return };
+    if !spec.split(',').any(|s| s.trim().parse::<u64>().ok() == Some(n)) {
+        return;
+    }
+    let (w, h) = surface_size();
+    if w <= 0 || h <= 0 {
+        return;
+    }
+    let mut px = vec![0u8; (w * h * 4) as usize];
+    unsafe {
+        let mut prev = 0i32;
+        gl::GetIntegerv(gl::READ_FRAMEBUFFER_BINDING, &mut prev);
+        gl::BindFramebuffer(gl::READ_FRAMEBUFFER, 0);
+        gl::PixelStorei(gl::PACK_ALIGNMENT, 1);
+        gl::ReadPixels(0, 0, w, h, gl::RGBA, gl::UNSIGNED_BYTE, px.as_mut_ptr() as *mut _);
+        gl::BindFramebuffer(gl::READ_FRAMEBUFFER, prev as u32);
+    }
+    // 32-bit BMP, bottom-up rows match GL's origin.
+    let mut bmp = Vec::with_capacity(54 + px.len());
+    let size = 54 + px.len() as u32;
+    bmp.extend_from_slice(b"BM");
+    bmp.extend_from_slice(&size.to_le_bytes());
+    bmp.extend_from_slice(&0u32.to_le_bytes());
+    bmp.extend_from_slice(&54u32.to_le_bytes());
+    bmp.extend_from_slice(&40u32.to_le_bytes());
+    bmp.extend_from_slice(&w.to_le_bytes());
+    bmp.extend_from_slice(&h.to_le_bytes());
+    bmp.extend_from_slice(&1u16.to_le_bytes());
+    bmp.extend_from_slice(&32u16.to_le_bytes());
+    bmp.extend_from_slice(&[0u8; 24]);
+    for p in px.chunks_exact(4) {
+        bmp.extend_from_slice(&[p[2], p[1], p[0], 255]);
+    }
+    let path = data_dir.join(format!("shot_{n}.bmp"));
+    match std::fs::write(&path, bmp) {
+        Ok(()) => log::info(&format!("screenshot {}", path.display())),
+        Err(e) => log::error(&format!("screenshot: {e}")),
+    }
+}

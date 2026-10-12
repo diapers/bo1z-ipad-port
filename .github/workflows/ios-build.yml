@@ -1,0 +1,108 @@
+name: ios-build
+
+# Builds the asset-free BO1Z.ipa (TrollStore, iPad Air M1, iOS 17):
+#   ANGLE (cached) -> cargo build aarch64-apple-ios -> ios/package.sh -> artifact.
+# Game data is NOT included; add it afterwards with `node inject-assets.mjs --ipa=BO1Z.ipa`.
+
+on:
+  workflow_dispatch:
+    inputs:
+      angle_mode:
+        description: 'ANGLE source: auto (pinned prebuilt, fall back to source build), prebuilt, source'
+        type: choice
+        options: [auto, prebuilt, source]
+        default: auto
+      xcode:
+        description: 'Xcode version to select if installed on the runner (e.g. 16.4, 26.0)'
+        required: false
+        default: '16.4'
+  push:
+    paths:
+      - 'host/**'
+      - 'ios/**'
+      - '.github/workflows/ios-build.yml'
+
+concurrency:
+  group: ios-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ipa:
+    runs-on: macos-15
+    timeout-minutes: 180   # only a cold ANGLE source build comes close to this
+    env:
+      IPHONEOS_DEPLOYMENT_TARGET: '17.0'   # must not exceed Info.plist MinimumOSVersion
+      CARGO_TERM_COLOR: always
+      ANGLE_MODE: ${{ inputs.angle_mode || 'auto' }}
+      ANGLE_DIR: ${{ github.workspace }}/build/angle-ios
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          want='${{ inputs.xcode || '16.4' }}'
+          if [ -d "/Applications/Xcode_${want}.app" ]; then
+            sudo xcode-select -s "/Applications/Xcode_${want}.app"
+          else
+            echo "::notice::Xcode ${want} not installed; using image default"
+          fi
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          sw_vers; uname -m; df -h "$GITHUB_WORKSPACE" | tail -1
+
+      - name: Install Rust + aarch64-apple-ios
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: 'host -> target'
+          key: aarch64-apple-ios
+
+      # Key = hash of the script (which holds every pin: prebuilt URL+sha256, ANGLE commit,
+      # gn args) + mode + runner arch. Bump a pin -> new key -> fresh fetch/build.
+      # Split restore/save so a finished ANGLE build is cached even if cargo fails later.
+      - name: Restore ANGLE cache
+        id: angle-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: build/angle-ios
+          key: angle-ios-${{ runner.arch }}-${{ env.ANGLE_MODE }}-${{ hashFiles('ios/fetch-or-build-angle.sh') }}
+
+      - name: Fetch or build ANGLE
+        if: steps.angle-cache.outputs.cache-hit != 'true'
+        run: bash ios/fetch-or-build-angle.sh "$ANGLE_DIR"
+
+      - name: Save ANGLE cache
+        if: steps.angle-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build/angle-ios
+          key: ${{ steps.angle-cache.outputs.cache-primary-key }}
+
+      - name: ANGLE info
+        run: cat "$ANGLE_DIR/ANGLE_INFO.txt"
+
+      - name: cargo build (aarch64-apple-ios, release)
+        run: |
+          cargo build --release --target aarch64-apple-ios --manifest-path host/Cargo.toml
+          ls -la host/target/aarch64-apple-ios/release/
+
+      - name: Package BO1Z.ipa
+        env:
+          BIN: ${{ github.workspace }}/host/target/aarch64-apple-ios/release/bo1z_host
+          OUT_DIR: ${{ github.workspace }}/build/ios
+          BUILD_NUMBER: ${{ github.run_number }}
+          SIGNER: codesign
+        run: bash ios/package.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BO1Z-ipa
+          path: |
+            build/ios/BO1Z.ipa
+            build/angle-ios/ANGLE_INFO.txt
+          if-no-files-found: error
+          retention-days: 14

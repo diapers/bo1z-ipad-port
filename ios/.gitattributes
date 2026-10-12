@@ -1,0 +1,3 @@
+# Scripts run on macOS runners: keep LF endings regardless of core.autocrlf.
+*.sh    text eol=lf
+*.plist text eol=lf
