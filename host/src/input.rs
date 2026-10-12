@@ -270,13 +270,29 @@ fn write_gpad(pad: &PadState) {
     mem::write(g + 40, &mem::bytes(g + 24, 16).to_vec());
     mem::set_u8(g, pad.connected as u8);
     mem::write(g + 2, &digitals.to_le_bytes());
-    mem::set_f32(g + 8, pad.lt);
-    mem::set_f32(g + 12, pad.rt);
-    for (i, v) in [pad.lx, pad.ly, pad.rx, pad.ry].into_iter().enumerate() {
+    // The engine asserts every axis deflection stays within [-1, 1] (cl_gamepad.cpp:744,
+    // CL_GamepadAxisValue). XInput sticks report inside a circle, but iOS GameController
+    // reports them on a square: a full diagonal is (1, 1), length 1.41, which the engine's
+    // radial deadzone maps past 1 and aborts on. Clamp each stick to the unit circle (a
+    // hair inside, for float slack) and each trigger to [0, 1].
+    let finite = |v: f32| if v.is_finite() { v } else { 0.0 };
+    let stick = |x: f32, y: f32| {
+        let (x, y) = (finite(x).clamp(-1.0, 1.0), finite(y).clamp(-1.0, 1.0));
+        let len = (x * x + y * y).sqrt();
+        const MAX: f32 = 0.999;
+        if len > MAX { (x * MAX / len, y * MAX / len) } else { (x, y) }
+    };
+    let trigger = |v: f32| finite(v).clamp(0.0, 1.0);
+    let (lx, ly) = stick(pad.lx, pad.ly);
+    let (rx, ry) = stick(pad.rx, pad.ry);
+    let (lt, rt) = (trigger(pad.lt), trigger(pad.rt));
+    mem::set_f32(g + 8, lt);
+    mem::set_f32(g + 12, rt);
+    for (i, v) in [lx, ly, rx, ry].into_iter().enumerate() {
         mem::set_f32(g + 24 + 4 * i as u32, v);
     }
     let axis = |v: f32| (v.clamp(-1.0, 1.0) * 65535.0) as i32;
-    for (i, v) in [pad.rx, pad.ry, pad.lx, pad.ly, pad.rt, pad.lt].into_iter().enumerate() {
+    for (i, v) in [rx, ry, lx, ly, rt, lt].into_iter().enumerate() {
         mem::set_i32(PHYS_AXES + 4 * i as u32, axis(v));
     }
 }

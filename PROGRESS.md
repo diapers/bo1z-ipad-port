@@ -177,3 +177,5 @@ Build 4 runs on the iPad (Five playable). Issues from the screen recording + use
   thread crashed (segfault) alongside the engine's context.
 - Test the iPad data layout on PC: D:\bo1z\idx-game (maps/*.json + junctions store, menu).
 - Build 20548b0 (CI run 38240728800): crash fix + cinematic flow -> D:o1z\BO1Z-all.ipa (6.73 GB). Awaiting device test.
+- Build 20548b0 on iPad: maps load and start, then abort ~1 s in: engine assert cl_gamepad.cpp:744 |axisDeflection| <= 1 (CL_GamepadAxisValue). iOS GameController sticks are square ((1,1) at diagonals); input.rs now clamps sticks to the unit circle (0.999) and triggers to [0,1]. Reproduced + verified on PC with BO1Z_FAKEPAD diagonals.
+- log.rs keeps the previous run as bo1z-previous.log.

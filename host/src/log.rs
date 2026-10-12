@@ -15,6 +15,11 @@ pub fn init(path: &std::path::Path) {
     if let Some(p) = path.parent() {
         let _ = std::fs::create_dir_all(p);
     }
+    // Keep the last run's log: after a crash, reopening the app would otherwise erase the
+    // only record of it.
+    if path.exists() {
+        let _ = std::fs::rename(path, path.with_file_name("bo1z-previous.log"));
+    }
     match std::fs::File::create(path) {
         Ok(f) => *FILE.lock() = Some(f),
         Err(e) => eprintln!("cannot open log {}: {e}", path.display()),
