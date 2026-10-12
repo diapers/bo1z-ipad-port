@@ -82,3 +82,15 @@ Build: `cd host && cargo build --release`. Run needs `libEGL.dll` + `libGLESv2.d
 4. TrollStore install; launch with "Open with JIT" (long-press). Log: Files app -> BO1Z -> bo1z.log.
 5. Later: AOT precompile (no per-launch JIT), loading-screen video decode, Kino/other maps picker.
 Note: iOS only supports Xbox One S / Series pads over Bluetooth (not Xbox 360 pads).
+
+## 2026-10-12: device crash diagnosed -> AOT
+- iPad crash report: EXC_BAD_ACCESS / Instruction Abort executing JIT code (page max prot rw-);
+  CS flags 0x22006305 lack CS_DEBUGGED -> JIT was not active. Everything before that worked
+  (UIKit, window, ANGLE frameworks, module compile).
+- Fix: AOT. `bo1z_host --precompile in.wasm out.cwasm --target aarch64-apple-ios`; build with
+  BO1Z_CWASM=out.cwasm -> host/build.rs + src/aot.rs `.incbin` it into an executable section
+  (__TEXT,__bo1z_engine on Apple) and load with Module::deserialize_raw + no-op CustomCodeMemory.
+  Verified on Windows (.text$bo1z): "module ready in 3.7ms", game boots. COFF max alignment is
+  8 KiB (`.p2align 16` crashes LLVM); Apple uses `.p2align 14`.
+- CI (ios-build.yml) now fetches the wasm (sha256 pinned), translates with binaryen@132,
+  precompiles, embeds. App no longer needs "Open with JIT".

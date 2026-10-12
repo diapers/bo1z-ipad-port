@@ -85,7 +85,32 @@ jobs:
       - name: ANGLE info
         run: cat "$ANGLE_DIR/ANGLE_INFO.txt"
 
-      - name: cargo build (aarch64-apple-ios, release)
+      # The engine is AOT-compiled here and embedded in the executable, so the app needs no
+      # JIT on the device (see host/src/aot.rs). The wasm is pinned by hash: the host's
+      # EM_ASM table (imports.rs) is specific to this exact build.
+      - name: Fetch engine wasm and translate legacy exceptions
+        env:
+          WASM_SHA256: 61192df377020627f52fa7e9fd28047bd53662aa46e5e3cd6e7fad0c5c35cc98
+        run: |
+          mkdir -p build/engine
+          curl -fsSL -A 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120 Safari/537.36' \
+            -e https://vel.gg/bo1z/ https://vel.gg/bo1z/artifacts/KisakBlack-web.wasm -o build/engine/KisakBlack-web.wasm
+          echo "$WASM_SHA256  build/engine/KisakBlack-web.wasm" | shasum -a 256 -c -
+          npx --yes -p binaryen@132 wasm-opt build/engine/KisakBlack-web.wasm -g \
+            --enable-threads --enable-bulk-memory --enable-bulk-memory-opt --enable-exception-handling \
+            --enable-mutable-globals --enable-nontrapping-float-to-int --enable-sign-ext \
+            --enable-reference-types --enable-multivalue --enable-simd --enable-tail-call \
+            --enable-extended-const --translate-to-exnref -o build/engine/KisakBlack-native.wasm
+          ls -la build/engine
+
+      - name: AOT-compile the engine for aarch64-apple-ios
+        run: |
+          cargo run --release --manifest-path host/Cargo.toml -- \
+            --precompile build/engine/KisakBlack-native.wasm build/engine/bo1z-ios.cwasm --target aarch64-apple-ios
+
+      - name: cargo build (aarch64-apple-ios, release, engine embedded)
+        env:
+          BO1Z_CWASM: ${{ github.workspace }}/build/engine/bo1z-ios.cwasm
         run: |
           cargo build --release --target aarch64-apple-ios --manifest-path host/Cargo.toml
           ls -la host/target/aarch64-apple-ios/release/

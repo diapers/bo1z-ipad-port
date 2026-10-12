@@ -4,6 +4,7 @@
 //!   bo1z_host [--map five|kino|...] [--game <dir with <slug>/ packs>] [--wasm <file>] [--egl <libEGL path>]
 //! iOS: everything is found inside the app bundle; logs go to Documents/bo1z.log.
 
+mod aot;
 mod audio;
 mod emval;
 mod fs;
@@ -142,7 +143,35 @@ fn data_dir() -> PathBuf {
     }
 }
 
+/// `bo1z_host --precompile <in.wasm> <out.cwasm> [--target <triple>]`: AOT-compile the
+/// engine with the exact runtime configuration (used by CI for the iOS build).
+fn precompile(args: &[String]) -> Result<()> {
+    let input = args.first().ok_or_else(|| anyhow!("--precompile <in.wasm> <out.cwasm> [--target T]"))?;
+    let output = args.get(1).ok_or_else(|| anyhow!("--precompile <in.wasm> <out.cwasm> [--target T]"))?;
+    let mut cfg = rt::engine_config();
+    if let Some(i) = args.iter().position(|a| a == "--target") {
+        let t = args.get(i + 1).ok_or_else(|| anyhow!("--target needs a triple"))?;
+        cfg.target(t)?;
+        eprintln!("target {t}");
+    }
+    let engine = wasmtime::Engine::new(&cfg)?;
+    let t0 = std::time::Instant::now();
+    let bytes = std::fs::read(input)?;
+    let out = engine.precompile_module(&bytes)?;
+    std::fs::write(output, &out)?;
+    eprintln!("precompiled {input} -> {output}: {:.1} MB in {:.1?}", out.len() as f64 / 1e6, t0.elapsed());
+    Ok(())
+}
+
 fn main() {
+    let argv: Vec<String> = std::env::args().collect();
+    if argv.get(1).map(String::as_str) == Some("--precompile") {
+        if let Err(e) = precompile(&argv[2..]) {
+            eprintln!("precompile failed: {e:?}");
+            std::process::exit(1);
+        }
+        return;
+    }
     // Log before anything else can fail: on iOS the log file is the only output.
     log::init(&data_dir().join("bo1z.log"));
     log::info(&format!("bo1z_host {} starting; exe dir {}", env!("CARGO_PKG_VERSION"), exe_dir().display()));

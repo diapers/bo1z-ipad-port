@@ -258,7 +258,9 @@ pub fn rt() -> &'static Rt {
     RT.get().expect("runtime not initialised")
 }
 
-fn engine_config() -> Config {
+/// The one engine configuration. `--precompile` and the device must agree on every
+/// setting, which wasmtime checks when the AOT artifact is loaded.
+pub fn engine_config() -> Config {
     let mut c = Config::new();
     c.wasm_threads(true);
     c.shared_memory(true);
@@ -284,14 +286,24 @@ fn engine_config() -> Config {
 }
 
 pub fn init(wasm_path: &std::path::Path, args: Vec<String>, paths: Paths) -> Result<()> {
-    crate::platform::check_jit();
     let t0 = Instant::now();
-    log::info(&format!("compiling {} ...", wasm_path.display()));
-    let engine = Engine::new(&engine_config())?;
-    let module = if wasm_path.extension().map_or(false, |e| e == "cwasm") {
-        unsafe { Module::deserialize_file(&engine, wasm_path)? }
+    let (engine, module) = if let Some(code) = crate::aot::embedded() {
+        log::info(&format!("loading embedded AOT engine code ({:.1} MB, no JIT needed)", code.len() as f64 / 1e6));
+        let mut cfg = engine_config();
+        cfg.with_custom_code_memory(Some(crate::aot::code_memory()));
+        let engine = Engine::new(&cfg)?;
+        let module = crate::aot::load(&engine, code)?;
+        (engine, module)
     } else {
-        Module::from_file(&engine, wasm_path)?
+        crate::platform::check_jit();
+        log::info(&format!("compiling {} ...", wasm_path.display()));
+        let engine = Engine::new(&engine_config())?;
+        let module = if wasm_path.extension().map_or(false, |e| e == "cwasm") {
+            unsafe { Module::deserialize_file(&engine, wasm_path)? }
+        } else {
+            Module::from_file(&engine, wasm_path)?
+        };
+        (engine, module)
     };
     log::info(&format!("module ready in {:.1?}", t0.elapsed()));
 

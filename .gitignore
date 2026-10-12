@@ -9,4 +9,4 @@ web-src/
 tools/node/
 build/
 data/
-host/target2/
+host/target*/
