@@ -94,3 +94,5 @@ Note: iOS only supports Xbox One S / Series pads over Bluetooth (not Xbox 360 pa
   8 KiB (`.p2align 16` crashes LLVM); Apple uses `.p2align 14`.
 - CI (ios-build.yml) now fetches the wasm (sha256 pinned), translates with binaryen@132,
   precompiles, embeds. App no longer needs "Open with JIT".
+- IPA build 3 (efe6ee6, CI run 38221436862): engine embedded (25.8 MB __TEXT,__bo1z_engine,
+  align 2^14). build/BO1Z-five.ipa = 790 MB. Waiting for device test (normal tap, no JIT).
