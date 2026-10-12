@@ -71,10 +71,7 @@ fn options() -> Result<Options> {
         }
     }
 
-    #[cfg(target_os = "ios")]
-    let data = std::env::var("HOME").map(|h| PathBuf::from(h).join("Documents")).unwrap_or_else(|_| dir.join("Documents"));
-    #[cfg(not(target_os = "ios"))]
-    let data = dir.join("data");
+    let data = data_dir();
 
     let game = game
         .or_else(|| first_existing(&[dir.join("game"), dir.join("../../../game")]))
@@ -133,7 +130,26 @@ fn engine_args(o: &Options, zone: &str, opfs_root: &str) -> Vec<String> {
     a
 }
 
+/// Writable data: Documents on iOS (visible in the Files app), ./data next to the exe elsewhere.
+fn data_dir() -> PathBuf {
+    #[cfg(target_os = "ios")]
+    {
+        std::env::var("HOME").map(|h| PathBuf::from(h).join("Documents")).unwrap_or_else(|_| exe_dir().join("Documents"))
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        exe_dir().join("data")
+    }
+}
+
 fn main() {
+    // Log before anything else can fail: on iOS the log file is the only output.
+    log::init(&data_dir().join("bo1z.log"));
+    log::info(&format!("bo1z_host {} starting; exe dir {}", env!("CARGO_PKG_VERSION"), exe_dir().display()));
+    std::panic::set_hook(Box::new(|info| {
+        log::error(&format!("PANIC: {info}\n{}", std::backtrace::Backtrace::force_capture()));
+        log::flush();
+    }));
     if let Err(e) = run() {
         log::error(&format!("{e:?}"));
         log::flush();
@@ -144,7 +160,6 @@ fn main() {
 
 fn run() -> Result<()> {
     let o = options()?;
-    log::init(&o.data.join("bo1z.log"));
     let (slug, zone) = MAPS.iter().find(|m| m.0 == o.map).copied().ok_or_else(|| anyhow!("unknown map {}", o.map))?;
     log::info(&format!("map {slug} ({zone}); packs {}; wasm {}", o.game.display(), o.wasm.display()));
 
@@ -155,7 +170,9 @@ fn run() -> Result<()> {
         opfs_root: o.data.join("opfs"),
         mounts: vec![(format!("{opfs_dir}/files"), o.game.join(slug))],
     };
-    rt::init(&o.wasm, engine_args(&o, zone, &opfs_root), paths)?;
-    let mut app = platform::App::new(o.egl.clone());
+    // The module is compiled on the browser-main thread after the window is up, so the UI
+    // thread finishes launching quickly (iOS kills apps that take too long to launch).
+    let boot = rt::Boot { wasm: o.wasm.clone(), args: engine_args(&o, zone, &opfs_root), paths };
+    let mut app = platform::App::new(o.egl.clone(), boot);
     platform::run(&mut app)
 }

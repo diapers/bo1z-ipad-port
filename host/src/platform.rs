@@ -29,6 +29,7 @@ pub fn fatal(msg: &str) -> ! {
 
 pub struct App {
     pub egl_lib: PathBuf,
+    boot: Option<rt::Boot>,
     window: Option<Window>,
     booted: bool,
     pads: Option<Pads>,
@@ -40,9 +41,10 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(egl_lib: PathBuf) -> Self {
+    pub fn new(egl_lib: PathBuf, boot: rt::Boot) -> Self {
         Self {
             egl_lib,
+            boot: Some(boot),
             window: None,
             booted: false,
             pads: None,
@@ -70,8 +72,10 @@ impl App {
         gl_ctx::create(&self.egl_lib, native)?;
         self.window = Some(window);
         self.pads = Some(Pads::new());
-        log::info("booting engine");
-        rt::start_browser_main();
+        log::info(&format!("window + EGL ready, surface {:?}", gl_ctx::surface_size()));
+        if let Some(boot) = self.boot.take() {
+            rt::start_browser_main(boot);
+        }
         self.booted = true;
         Ok(())
     }
@@ -103,7 +107,7 @@ impl App {
         let now = Instant::now();
         let dt = (now - self.last_tick).as_secs_f32().min(0.1);
         self.last_tick = now;
-        if !self.booted {
+        if !self.booted || !rt::ready() {
             return;
         }
         if let Some(secs) = self.autoplay {
@@ -215,6 +219,28 @@ impl ApplicationHandler<()> for App {
         el.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(8)));
     }
 }
+
+/// iOS: wasmtime JIT-compiles the game, which needs the process to be marked as debugged
+/// (TrollStore "Open with JIT"). Log loudly when it is missing.
+#[cfg(target_os = "ios")]
+pub fn check_jit() {
+    extern "C" {
+        fn csops(pid: i32, ops: u32, useraddr: *mut u32, usersize: usize) -> i32;
+        fn getpid() -> i32;
+    }
+    const CS_OPS_STATUS: u32 = 0;
+    const CS_DEBUGGED: u32 = 0x1000_0000;
+    let mut flags = 0u32;
+    let rc = unsafe { csops(getpid(), CS_OPS_STATUS, &mut flags, 4) };
+    let jit = rc == 0 && flags & CS_DEBUGGED != 0;
+    log::info(&format!("code-signing flags {flags:#x} (rc {rc}); JIT {}", if jit { "AVAILABLE" } else { "NOT available" }));
+    if !jit {
+        log::error("JIT is not enabled. Long-press BO1Z in TrollStore and choose \"Open with JIT\".");
+    }
+}
+
+#[cfg(not(target_os = "ios"))]
+pub fn check_jit() {}
 
 pub fn run(app: &mut App) -> anyhow::Result<()> {
     let el = EventLoop::<()>::with_user_event().build()?;

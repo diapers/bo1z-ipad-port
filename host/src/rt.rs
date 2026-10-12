@@ -284,7 +284,9 @@ fn engine_config() -> Config {
 }
 
 pub fn init(wasm_path: &std::path::Path, args: Vec<String>, paths: Paths) -> Result<()> {
+    crate::platform::check_jit();
     let t0 = Instant::now();
+    log::info(&format!("compiling {} ...", wasm_path.display()));
     let engine = Engine::new(&engine_config())?;
     let module = if wasm_path.extension().map_or(false, |e| e == "cwasm") {
         unsafe { Module::deserialize_file(&engine, wasm_path)? }
@@ -476,22 +478,42 @@ pub fn ui_state() -> i32 {
 
 /// Queue KB_Input on the browser-main thread (the page's main thread in the web build).
 pub fn post_input(kind: i32, a: i32, b: i32) {
-    rt().main_inbox.push(Msg::Input(kind, a, b));
+    if let Some(r) = RT.get() {
+        r.main_inbox.push(Msg::Input(kind, a, b));
+    }
 }
 
-/// Run the browser-main role on its own big-stack thread (iOS gives the UI thread 1 MiB).
-pub fn start_browser_main() {
+/// Everything needed to compile and start the engine.
+pub struct Boot {
+    pub wasm: std::path::PathBuf,
+    pub args: Vec<String>,
+    pub paths: Paths,
+}
+
+/// Run the browser-main role on its own big-stack thread (iOS gives the UI thread 1 MiB):
+/// compile the module, boot the runtime, then service the main mailbox forever.
+pub fn start_browser_main(boot: Boot) {
     std::thread::Builder::new()
         .name("browser-main".into())
         .stack_size(32 << 20)
-        .spawn(|| match boot_main() {
-            Ok(m) => {
-                crate::audio::start();
-                m.run()
+        .spawn(move || {
+            if let Err(e) = init(&boot.wasm, boot.args, boot.paths) {
+                crate::platform::fatal(&format!("engine load failed: {e:?}"));
             }
-            Err(e) => crate::platform::fatal(&format!("engine boot failed: {e:?}")),
+            match boot_main() {
+                Ok(m) => {
+                    crate::audio::start();
+                    m.run()
+                }
+                Err(e) => crate::platform::fatal(&format!("engine boot failed: {e:?}")),
+            }
         })
         .expect("spawn browser-main thread");
+}
+
+/// Whether the UI thread may forward input yet (the runtime exists once init finished).
+pub fn ready() -> bool {
+    RT.get().is_some()
 }
 
 // ---------------------------------------------------------------------------------------
