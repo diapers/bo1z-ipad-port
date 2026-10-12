@@ -15,6 +15,7 @@ type Egl = egl::DynamicInstance<egl::EGL1_4>;
 struct Ctx {
     egl: Egl,
     display: egl::Display,
+    config: egl::Config,
     surface: egl::Surface,
     context: egl::Context,
 }
@@ -86,7 +87,7 @@ pub fn create(lib: &Path, window: *mut std::ffi::c_void) -> Result<()> {
     }
     let _ = egl.swap_buffers(display, surface);
     egl.make_current(display, None, None, None)?;
-    CTX.set(Ctx { egl, display, surface, context }).map_err(|_| anyhow!("EGL context created twice"))?;
+    CTX.set(Ctx { egl, display, config, surface, context }).map_err(|_| anyhow!("EGL context created twice"))?;
     Ok(())
 }
 
@@ -114,6 +115,54 @@ pub fn make_current() -> Result<bool> {
         log::info(&format!("GL_RENDERER={} GL_VERSION={}", s(gl::RENDERER), s(gl::VERSION)));
     }
     Ok(true)
+}
+
+/// A second window surface with its own (unshared) context, driven from the UI thread
+/// while the engine thread owns the main one (desktop loading video).
+pub struct Aux {
+    surface: egl::Surface,
+    context: egl::Context,
+}
+
+impl Aux {
+    pub fn new(window: *mut std::ffi::c_void) -> Result<Self> {
+        let c = ctx()?;
+        let surface = unsafe { c.egl.create_window_surface(c.display, c.config, window as egl::NativeWindowType, None)? };
+        let attrs = [egl::CONTEXT_MAJOR_VERSION, 3, egl::CONTEXT_MINOR_VERSION, 0, egl::NONE];
+        let context = c.egl.create_context(c.display, c.config, None, &attrs)?;
+        Ok(Self { surface, context })
+    }
+
+    pub fn make_current(&self) -> Result<()> {
+        let c = ctx()?;
+        c.egl.make_current(c.display, Some(self.surface), Some(self.surface), Some(self.context))?;
+        let _ = c.egl.swap_interval(c.display, 0);
+        Ok(())
+    }
+
+    pub fn size(&self) -> (i32, i32) {
+        let Ok(c) = ctx() else { return (0, 0) };
+        (
+            c.egl.query_surface(c.display, self.surface, egl::WIDTH).unwrap_or(0),
+            c.egl.query_surface(c.display, self.surface, egl::HEIGHT).unwrap_or(0),
+        )
+    }
+
+    pub fn swap(&self) {
+        if let Ok(c) = ctx() {
+            let _ = c.egl.swap_buffers(c.display, self.surface);
+        }
+    }
+}
+
+impl Drop for Aux {
+    fn drop(&mut self) {
+        if let Ok(c) = ctx() {
+            let _ = c.egl.make_current(c.display, None, None, None);
+            let _ = c.egl.destroy_context(c.display, self.context);
+            let _ = c.egl.destroy_surface(c.display, self.surface);
+        }
+    }
 }
 
 pub fn release_current() {

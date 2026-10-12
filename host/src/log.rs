@@ -44,6 +44,11 @@ pub fn error(msg: &str) {
 /// Engine stdout/stderr (Module.print / printErr).
 pub fn engine(msg: &str, err: bool) {
     crate::loading::engine_line(msg);
+    // "Quit" in the pause menu: the engine falls back to its front end, which the web
+    // build does not ship (black screen). Go back to the map select instead.
+    if msg.contains("Com_LoadFrontEnd") {
+        crate::platform::return_to_menu();
+    }
     emit(if err { "eng! " } else { "eng  " }, msg.trim_end_matches('\n'));
 }
 

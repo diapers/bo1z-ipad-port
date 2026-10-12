@@ -7,6 +7,8 @@
 //   Payload/BO1Z.app/game/store/<ab>/<sha256>   every unique file a chosen map uses
 //   Payload/BO1Z.app/game/maps/<slug>.json      {slug, files: [[path, sha256, size], ...]}
 //   Payload/BO1Z.app/game/menu/mapselect-*.webp  the site's map-select art (<root>/maps/menu)
+//   Payload/BO1Z.app/game/menu/loadscreen-*.png  each map's BO1 loading screen (extract-loadscreens.mjs)
+//   Payload/BO1Z.app/game/menu/load-*.mp4        each map's loading cinematic as H.264 (convert-videos.mjs)
 // The host (src/maps.rs + fs.rs index mounts) serves each map's paths from its index.
 //
 // Sources: <root>/maps/<slug>/manifest.json (site manifest) and <root>/store/<ab>/<sha256>
@@ -102,7 +104,7 @@ try {
   const menuSrc = join(ROOT, 'maps', 'menu');
   if (existsSync(menuSrc)) {
     mkdirSync(join(game, 'menu'), { recursive: true });
-    const art = readdirSync(menuSrc).filter(n => n.endsWith('.webp'));
+    const art = readdirSync(menuSrc).filter(n => /.(webp|png|mp4)$/.test(n));
     for (const n of art) copyFileSync(join(menuSrc, n), join(game, 'menu', n));
     console.log(`menu art: ${art.length} images`);
   } else console.log('menu art: none (plain selector)');

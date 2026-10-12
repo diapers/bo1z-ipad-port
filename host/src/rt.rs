@@ -490,6 +490,14 @@ pub fn ui_state() -> i32 {
 
 /// Queue KB_Input on the browser-main thread (the page's main thread in the web build).
 pub fn post_input(kind: i32, a: i32, b: i32) {
+    // The intro gate opens only once the map has loaded (the loading screen asks for it).
+    if kind == crate::input::INTRO {
+        if !crate::loading::done() || crate::loading::is_released() {
+            return;
+        }
+        crate::loading::released();
+        crate::log::info("player started");
+    }
     if let Some(r) = RT.get() {
         r.main_inbox.push(Msg::Input(kind, a, b));
     }

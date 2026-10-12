@@ -226,6 +226,43 @@ pub const TILE_SEL: [f32; 3] = [0.62, 0.08, 0.06];
 // Desktop rendering: every image is opaque, so each one is a framebuffer blit from a
 // texture-backed FBO (no shaders, no blending). Plain mode: scissor clears + 5x7 font.
 
+/// Decode a .webp or .png file: (width, height, pixels, has alpha).
+#[cfg(not(target_os = "ios"))]
+fn decode(path: &Path) -> Option<(u32, u32, Vec<u8>, bool)> {
+    let bytes = std::fs::read(path).ok()?;
+    if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("png")) {
+        let mut dec = png::Decoder::new(std::io::Cursor::new(bytes));
+        dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+        let mut r = dec.read_info().ok()?;
+        let mut buf = vec![0u8; r.output_buffer_size()?];
+        let info = r.next_frame(&mut buf).ok()?;
+        buf.truncate(info.buffer_size());
+        let alpha = match info.color_type {
+            png::ColorType::Rgba => true,
+            png::ColorType::Rgb => false,
+            _ => return None,
+        };
+        return Some((info.width, info.height, buf, alpha));
+    }
+    let mut dec = image_webp::WebPDecoder::new(std::io::Cursor::new(bytes)).ok()?;
+    let (w, h) = dec.dimensions();
+    let mut buf = vec![0u8; dec.output_buffer_size()?];
+    dec.read_image(&mut buf).ok()?;
+    Some((w, h, buf, dec.has_alpha()))
+}
+
+/// The GL images live in the one EGL context, used by the menu (main thread) and then by
+/// the loading screen (engine thread, before presents); never both at once.
+#[cfg(not(target_os = "ios"))]
+static GL_ART: std::sync::Mutex<Option<GlArt>> = std::sync::Mutex::new(None);
+
+/// Run `f` with the shared GL image cache (context must be current).
+#[cfg(not(target_os = "ios"))]
+pub fn with_gl_art<R>(f: impl FnOnce(&mut GlArt) -> R) -> R {
+    let mut g = GL_ART.lock().unwrap();
+    f(g.get_or_insert_with(GlArt::new))
+}
+
 #[cfg(not(target_os = "ios"))]
 pub struct GlArt {
     fbo: u32,
@@ -244,12 +281,8 @@ impl GlArt {
         if let Some(t) = self.images.get(path) {
             return Some(*t);
         }
-        let bytes = std::fs::read(path).ok()?;
-        let mut dec = image_webp::WebPDecoder::new(std::io::Cursor::new(bytes)).ok()?;
-        let (w, h) = dec.dimensions();
-        let mut buf = vec![0u8; dec.output_buffer_size()?];
-        dec.read_image(&mut buf).ok()?;
-        let fmt = if dec.has_alpha() { gl::RGBA } else { gl::RGB };
+        let (w, h, buf, alpha) = decode(path)?;
+        let fmt = if alpha { gl::RGBA } else { gl::RGB };
         let mut tex = 0;
         unsafe {
             gl::GenTextures(1, &mut tex);
@@ -265,7 +298,7 @@ impl GlArt {
     }
 
     /// Draw `path` into `r` (top-left origin) on a surface `sh` pixels tall.
-    fn blit(&mut self, path: &Path, r: Rect, sh: i32) {
+    pub fn blit(&mut self, path: &Path, r: Rect, sh: i32) {
         let Some((tex, w, h)) = self.texture(path) else { return };
         unsafe {
             gl::BindFramebuffer(gl::READ_FRAMEBUFFER, self.fbo);
@@ -278,19 +311,15 @@ impl GlArt {
         }
     }
 
-    pub fn delete(self) {
-        unsafe {
-            for (tex, _, _) in self.images.values() {
-                gl::DeleteTextures(1, tex);
-            }
-            gl::DeleteFramebuffers(1, &self.fbo);
-            gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
-        }
-    }
 }
 
 #[cfg(not(target_os = "ios"))]
-pub fn draw_gl(menu: &Menu, art: &mut GlArt, w: i32, h: i32) {
+pub fn draw_gl(menu: &Menu, w: i32, h: i32) {
+    with_gl_art(|art| draw_gl_with(menu, art, w, h))
+}
+
+#[cfg(not(target_os = "ios"))]
+fn draw_gl_with(menu: &Menu, art: &mut GlArt, w: i32, h: i32) {
     unsafe {
         gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
         gl::Viewport(0, 0, w, h);
@@ -341,7 +370,7 @@ pub fn draw_gl(menu: &Menu, art: &mut GlArt, w: i32, h: i32) {
 
 /// Centre `s` in the box with `px`-sized font pixels.
 #[cfg(not(target_os = "ios"))]
-fn text(rect: &impl Fn(i32, i32, i32, i32, [f32; 3]), s: &str, b: Rect, px: i32, c: [f32; 3]) {
+pub fn text(rect: &impl Fn(i32, i32, i32, i32, [f32; 3]), s: &str, b: Rect, px: i32, c: [f32; 3]) {
     let n = s.chars().count().max(1) as i32;
     let tw = n * 6 * px - px;
     let (ox, oy) = (b.x as i32 + (b.w as i32 - tw) / 2, b.y as i32 + (b.h as i32 - 7 * px) / 2);

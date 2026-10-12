@@ -188,12 +188,13 @@ pub struct Mapper {
     held: HashSet<i32>,
     menu: Option<bool>,
     intro_released: bool,
+    intro_armed: bool,
     was_connected: bool,
 }
 
 impl Mapper {
     pub fn new() -> Self {
-        Self { held: HashSet::new(), menu: None, intro_released: false, was_connected: false }
+        Self { held: HashSet::new(), menu: None, intro_released: false, intro_armed: false, was_connected: false }
     }
 
     fn set(&mut self, out: &mut Vec<Event>, k: i32, down: bool) {
@@ -232,9 +233,15 @@ impl Mapper {
         write_gpad(pad);
 
         // The engine holds the first loaded frame until the player is "in" (engine.js play()).
-        if !self.intro_released && (pad.buttons.contains(&Btn::A) || pad.buttons.contains(&Btn::Start)) {
-            self.intro_released = true;
-            out.push((INTRO, 1, 0));
+        // Only after loading, and only on a fresh press (not the A that picked the map).
+        let start_held = pad.buttons.contains(&Btn::A) || pad.buttons.contains(&Btn::Start);
+        if !self.intro_released && crate::loading::done() {
+            if !start_held {
+                self.intro_armed = true;
+            } else if self.intro_armed {
+                self.intro_released = true;
+                out.push((INTRO, 1, 0));
+            }
         }
 
         // Menus unlock the pointer; the engine's BrowserFrame gamepad cursor takes over.

@@ -162,3 +162,10 @@ Build 4 runs on the iPad (Five playable). Issues from the screen recording + use
 - Desktop: game menus (pause) release the mouse and get an absolute cursor; re-locked on close.
 - package-ipa.mjs: CI IPA + engine + store blobs (hard-linked staging in D:\bo1z\tmp-ipa) + per-map
   indexes + menu art -> D:\bo1z\BO1Z-all.ipa.
+- Loading screen = each map's loading cinematic (web/video/<zone>_load.webm -> convert-videos.mjs ->
+  maps/menu/load-<slug>.mp4, H.264/AAC). iOS: AVPlayer layer under the bar. Desktop: ffmpeg-decoded
+  frames in a child window with its own EGL context (gl_ctx::Aux, loadvideo.rs). Fallback still:
+  extract-loadscreens.mjs (DXT1 loadscreen_<zone>.iwi -> loadscreen-<slug>.png). Status line says
+  LOADING, then PRESS A TO START; the intro gate (KB_Input 7) only opens after load on a fresh press.
+- Pause-menu Quit logs Com_LoadFrontEnd (no front end in this build): desktop relaunches into the
+  map select; iOS exits (cannot spawn) -> reopen lands on the map select.

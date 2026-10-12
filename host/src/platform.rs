@@ -17,6 +17,37 @@ use crate::menu::Menu;
 use crate::{gl_ctx, log, rt, Launcher};
 
 
+static BACK_TO_MENU: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Ask the UI thread to leave the game for the map select.
+pub fn return_to_menu() {
+    if !BACK_TO_MENU.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        log::info("game quit: returning to the map select");
+    }
+}
+
+/// The engine cannot be torn down and rebooted in place (its threads and 2 GiB heap stay
+/// live), so returning to the map select restarts the app. Desktop relaunches itself with
+/// the same arguments minus `--map`; iOS cannot spawn processes, so the app exits and
+/// opens on the map select next time.
+fn restart_to_menu() -> ! {
+    log::flush();
+    #[cfg(not(target_os = "ios"))]
+    {
+        let mut args: Vec<String> = std::env::args().skip(1).collect();
+        if let Some(i) = args.iter().position(|a| a == "--map") {
+            args.drain(i..(i + 2).min(args.len()));
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            match std::process::Command::new(exe).args(&args).spawn() {
+                Ok(_) => log::info("relaunched into the map select"),
+                Err(e) => log::error(&format!("relaunch failed: {e}")),
+            }
+        }
+    }
+    quit(0)
+}
+
 pub fn quit(code: i32) -> ! {
     log::info(&format!("quitting ({code})"));
     log::flush();
@@ -38,8 +69,12 @@ pub struct App {
     cursor: (f64, f64),
     #[cfg(target_os = "ios")]
     menu_overlay: Option<crate::menu::Overlay>,
+    /// Desktop loading cinematic: a child window over the game, and its player.
     #[cfg(not(target_os = "ios"))]
-    menu_art: Option<crate::menu::GlArt>,
+    load_video: Option<(Window, crate::loadvideo::LoadVideo)>,
+    /// The active event loop, valid only while a handler runs (window creation needs it).
+    event_loop: Option<*const ActiveEventLoop>,
+
     window: Option<Window>,
     booted: bool,
     pads: Option<Pads>,
@@ -65,7 +100,9 @@ impl App {
             #[cfg(target_os = "ios")]
             menu_overlay: None,
             #[cfg(not(target_os = "ios"))]
-            menu_art: None,
+            load_video: None,
+            event_loop: None,
+
             window: None,
             booted: false,
             pads: None,
@@ -110,7 +147,6 @@ impl App {
 
     /// Boot the engine with the chosen map, behind the loading bar.
     fn launch(&mut self, m: MapInfo) -> anyhow::Result<()> {
-        self.menu = None;
         #[cfg(target_os = "ios")]
         {
             if let Some(o) = self.menu_overlay.take() {
@@ -118,23 +154,70 @@ impl App {
             }
             self.loading_overlay = self.window.as_ref().and_then(game_view).and_then(|v| crate::loading::Overlay::new(&v));
         }
+        // The map's loading cinematic, its still loading screen, else its map-select panel.
+        let video = self.launcher.menu_dir().join(format!("load-{}.mp4", m.slug));
+        crate::loading::set_video(video.is_file().then_some(video));
+        let screen = self.launcher.menu_dir().join(format!("loadscreen-{}.png", m.slug));
+        crate::loading::set_panel(if screen.is_file() {
+            Some(screen)
+        } else {
+            self.menu.as_ref().and_then(|menu| menu.art_file("panel", Some(m.slug)))
+        });
         #[cfg(not(target_os = "ios"))]
         {
-            if let Some(a) = self.menu_art.take() {
-                if gl_ctx::make_current().is_ok() {
-                    a.delete();
-                }
+            // Show the loading screen right away; the engine draws nothing for a while.
+            let (w, h) = gl_ctx::surface_size();
+            if gl_ctx::make_current().is_ok() {
+                crate::loading::draw(w, h);
+                gl_ctx::swap();
             }
             gl_ctx::release_current();
+            self.load_video = self.start_video();
             if let Some(w) = self.window.as_ref() {
                 w.set_title(&format!("BO1Z - {}", m.name));
             }
         }
+        self.menu = None;
         // Render at the drawing-buffer size (engine.js passes the canvas size the same way).
         let boot = self.launcher.boot(&m, gl_ctx::surface_size())?;
         rt::start_browser_main(boot);
         self.booted = true;
         Ok(())
+    }
+
+    /// Desktop: the cinematic in a borderless child window covering the game window.
+    #[cfg(not(target_os = "ios"))]
+    fn start_video(&mut self) -> Option<(Window, crate::loadvideo::LoadVideo)> {
+        let video = crate::loading::video()?;
+        let el = self.event_loop.as_ref()?;
+        let parent = self.window.as_ref()?;
+        let size = parent.inner_size();
+        let raw = parent.window_handle().ok()?.as_raw();
+        let attrs = Window::default_attributes()
+            .with_decorations(false)
+            .with_inner_size(size)
+            .with_position(winit::dpi::PhysicalPosition::new(0, 0));
+        let attrs = unsafe { attrs.with_parent_window(Some(raw)) };
+        // SAFETY: the pointer is only used during this call, inside the event loop.
+        let el = unsafe { &**el };
+        let child = match el.create_window(attrs) {
+            Ok(w) => w,
+            Err(e) => {
+                log::error(&format!("video window: {e}"));
+                return None;
+            }
+        };
+        let native = native_window(&child).ok()?;
+        match crate::loadvideo::LoadVideo::start(native, &video) {
+            Ok(v) => {
+                crate::loading::set_video_active(true);
+                Some((child, v))
+            }
+            Err(e) => {
+                log::error(&format!("loading video: {e}"));
+                None
+            }
+        }
     }
 
     fn choose(&mut self, i: usize) {
@@ -160,8 +243,7 @@ impl App {
         {
             let (w, h) = gl_ctx::surface_size();
             if gl_ctx::make_current().is_ok() {
-                let art = self.menu_art.get_or_insert_with(crate::menu::GlArt::new);
-                crate::menu::draw_gl(menu, art, w, h);
+                crate::menu::draw_gl(menu, w, h);
                 gl_ctx::swap();
             }
             if let Some(win) = self.window.as_ref() {
@@ -169,6 +251,19 @@ impl App {
                     win.set_title(&format!("BO1Z - {}  (arrows / d-pad, Enter / A to play)", m.name));
                 }
             }
+        }
+    }
+
+    /// The map has loaded and the loading screen asks the player to start.
+    fn waiting_to_start(&self) -> bool {
+        self.booted && crate::loading::done() && !crate::loading::is_released()
+    }
+
+    fn start_game(&mut self) {
+        rt::post_input(input::INTRO, 1, 0);
+        #[cfg(not(target_os = "ios"))]
+        if !self.grabbed {
+            self.set_grab(true);
         }
     }
 
@@ -204,6 +299,26 @@ impl App {
     }
 
     fn tick(&mut self) {
+        #[cfg(not(target_os = "ios"))]
+        if let Some((child, v)) = self.load_video.as_mut() {
+            if crate::loading::is_released() {
+                crate::loading::set_video_active(false);
+                self.load_video = None; // stops ffmpeg, destroys the child window
+                if let Some(w) = self.window.as_ref() {
+                    w.focus_window();
+                }
+            } else {
+                if let Some(p) = self.window.as_ref().map(|w| w.inner_size()) {
+                    if child.inner_size() != p {
+                        let _ = child.request_inner_size(p);
+                    }
+                }
+                v.tick();
+            }
+        }
+        if BACK_TO_MENU.load(std::sync::atomic::Ordering::Relaxed) {
+            restart_to_menu();
+        }
         if self.menu.is_some() {
             let pad = match (self.fake_pad.as_mut(), self.pads.as_mut()) {
                 (Some(f), _) => Some(f.poll(self.started.elapsed().as_secs_f32())),
@@ -233,7 +348,7 @@ impl App {
             return;
         }
         if let Some(secs) = self.autoplay {
-            if self.started.elapsed().as_secs_f32() > secs {
+            if self.started.elapsed().as_secs_f32() > secs && crate::loading::done() {
                 self.autoplay = None;
                 log::info("autoplay: releasing intro");
                 rt::post_input(input::INTRO, 1, 0);
@@ -273,6 +388,7 @@ impl App {
 
 impl ApplicationHandler<()> for App {
     fn resumed(&mut self, el: &ActiveEventLoop) {
+        self.event_loop = Some(el as *const _);
         if self.window.is_some() {
             return;
         }
@@ -283,7 +399,8 @@ impl ApplicationHandler<()> for App {
 
     fn user_event(&mut self, _el: &ActiveEventLoop, _ev: ()) {}
 
-    fn window_event(&mut self, _el: &ActiveEventLoop, _id: WindowId, ev: WindowEvent) {
+    fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, ev: WindowEvent) {
+        self.event_loop = Some(el as *const _);
         match ev {
             WindowEvent::CloseRequested => quit(0),
             WindowEvent::Focused(false) => {
@@ -329,6 +446,14 @@ impl ApplicationHandler<()> for App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                // Enter / Space on the "press to start" screen.
+                if event.state == ElementState::Pressed && !event.repeat && self.waiting_to_start() {
+                    use winit::keyboard::KeyCode as K;
+                    if matches!(event.physical_key, PhysicalKey::Code(K::Enter | K::NumpadEnter | K::Space)) {
+                        self.start_game();
+                        return;
+                    }
+                }
                 if let PhysicalKey::Code(code) = event.physical_key {
                     if let Some(k) = input::winit_key(code) {
                         if !event.repeat {
@@ -348,10 +473,13 @@ impl ApplicationHandler<()> for App {
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
+                if state == ElementState::Pressed && button == MouseButton::Left && self.waiting_to_start() {
+                    self.start_game();
+                    return;
+                }
                 // An unlocked click in gameplay only re-captures the mouse; in a menu it clicks.
                 let in_menu = rt::ready() && rt::ui_state() & 1 != 0;
                 if !self.grabbed && !in_menu && state == ElementState::Pressed && button == MouseButton::Left {
-                    self.send((input::INTRO, 1, 0));
                     self.set_grab(true);
                     return;
                 }
@@ -395,6 +523,7 @@ impl ApplicationHandler<()> for App {
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        self.event_loop = Some(el as *const _);
         self.tick();
         el.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(8)));
     }

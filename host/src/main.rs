@@ -13,6 +13,8 @@ mod gl_ctx;
 mod imports;
 mod input;
 mod loading;
+#[cfg(not(target_os = "ios"))]
+mod loadvideo;
 mod log;
 mod maps;
 mod menu;
@@ -177,6 +179,11 @@ pub struct Launcher {
 }
 
 impl Launcher {
+    /// Menu and loading-screen art (`<game>/menu`).
+    pub fn menu_dir(&self) -> PathBuf {
+        self.game.join("menu")
+    }
+
     pub fn boot(&self, m: &maps::MapInfo, size: (i32, i32)) -> Result<rt::Boot> {
         log::info(&format!("map {} ({}); game {}; wasm {}", m.slug, m.zone, self.game.display(), self.wasm.display()));
         let (mount, ff_bytes) = m.mount(&self.game)?;
