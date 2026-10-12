@@ -390,7 +390,14 @@ fn execute_packets(start: u32, count: u32, data: u32, uploads: u32, upload_count
                 7 => gl::EnableVertexAttribArray(a),
                 8 => gl::DisableVertexAttribArray(a),
                 9 => gl::ActiveTexture(a),
-                10 => gl::BindTexture(a, s.n(Kind::Texture, b)),
+                10 => {
+                    if crate::glstats::on() {
+                        let mut u = 0i32;
+                        gl::GetIntegerv(gl::ACTIVE_TEXTURE, &mut u);
+                        crate::glstats::bind(u as u32 - gl::TEXTURE0, s.n(Kind::Texture, b));
+                    }
+                    gl::BindTexture(a, s.n(Kind::Texture, b))
+                }
                 11 => gl::BindSampler(a, s.n(Kind::Sampler, b)),
                 12 => gl::SamplerParameteri(s.n(Kind::Sampler, a), b, c as i32),
                 13 => gl::SamplerParameterf(s.n(Kind::Sampler, a), b, mem::f32(p + 12)),
@@ -409,9 +416,22 @@ fn execute_packets(start: u32, count: u32, data: u32, uploads: u32, upload_count
                 26 => gl::StencilMaskSeparate(a, b),
                 27 => gl::StencilOpSeparate(a, b, c, d),
                 28 => gl::PolygonOffset(mem::f32(p + 4), mem::f32(p + 8)),
-                29 => gl::Uniform1i(uniform_loc(s, a as i32), b as i32),
+                29 => {
+                    if crate::glstats::on() {
+                        crate::glstats::uniforms_changed(s.n(Kind::Program, s.current_program));
+                    }
+                    gl::Uniform1i(uniform_loc(s, a as i32), b as i32)
+                }
                 30 => gl::Uniform1f(uniform_loc(s, a as i32), mem::f32(p + 8)),
                 31 => gl::Uniform2f(uniform_loc(s, a as i32), mem::f32(p + 8), mem::f32(p + 12)),
+                32 | 33 if crate::glstats::on() => {
+                    crate::glstats::draw();
+                    if op == 32 {
+                        gl::DrawArrays(a, b as i32, c as i32)
+                    } else {
+                        gl::DrawElements(a, b as i32, c, d as usize as *const _)
+                    }
+                }
                 32 => gl::DrawArrays(a, b as i32, c as i32),
                 33 => gl::DrawElements(a, b as i32, c, d as usize as *const _),
                 34 => {
@@ -429,6 +449,9 @@ fn execute_packets(start: u32, count: u32, data: u32, uploads: u32, upload_count
                         let mask = mem::u32(t + 4);
                         let target = mem::u32(t + 8);
                         let tex = s.n(Kind::Texture, mem::u32(t + 12));
+                        if crate::glstats::on() && mask & 1 != 0 && target == gl::TEXTURE_2D {
+                            crate::glstats::bind(unit, tex);
+                        }
                         let sampler = s.n(Kind::Sampler, mem::u32(t + 16));
                         if mask & 7 != 0 {
                             gl::ActiveTexture(gl::TEXTURE0 + unit);
@@ -677,9 +700,24 @@ pub fn register(l: &mut Linker<Ctx>) -> Result<()> {
 
     // --- shaders / programs ------------------------------------------------------------------------
     l.func_wrap("env", "glShaderSource", |_: Cx, sh: i32, count: i32, strings: i32, lengths: i32| {
-        let src = source_string(count, strings as u32, lengths as u32);
-        let c = CString::new(src.replace('\0', " ")).unwrap_or_default();
+        let mut src = source_string(count, strings as u32, lengths as u32);
         let native = with(|s| s.n(Kind::Shader, sh as u32));
+        // The engine draws depth first (r_depthPrepass), then colour and decals with LEQUAL
+        // against that depth, from different programs. GLSL only promises the same position
+        // from the same math when gl_Position is invariant: Metal compiles each program's
+        // vertex stage on its own and rounds differently, so later passes failed the depth
+        // test in blocks and stripes (black patches on the iPad).
+        let mut ty = 0;
+        unsafe { gl::GetShaderiv(native, gl::SHADER_TYPE, &mut ty) };
+        if ty as u32 == gl::VERTEX_SHADER && src.starts_with("#version 300 es") && !src.contains("invariant gl_Position") {
+            src = src.replacen("#version 300 es", "#version 300 es\ninvariant gl_Position;", 1);
+        }
+        // Debug: BO1Z_SHADERDUMP=<dir> writes every shader source there.
+        if let Some(dir) = std::env::var_os("BO1Z_SHADERDUMP") {
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(std::path::Path::new(&dir).join(format!("{sh}.glsl")), &src);
+        }
+        let c = CString::new(src.replace('\0', " ")).unwrap_or_default();
         unsafe { gl::ShaderSource(native, 1, &c.as_ptr(), std::ptr::null()) };
     })?;
     l.func_wrap("env", "glCompileShader", |_: Cx, sh: i32| {
@@ -716,7 +754,11 @@ pub fn register(l: &mut Linker<Ctx>) -> Result<()> {
             return;
         }
         let p = with(|s| s.n(Kind::Program, prog as u32));
+        let t = std::time::Instant::now();
         unsafe { gl::GetProgramiv(p, pname as u32, mem::ptr(out as u32) as *mut i32) };
+        if crate::glstats::on() {
+            crate::glstats::program_query(pname as u32, mem::i32(out as u32), t.elapsed());
+        }
     })?;
     l.func_wrap("env", "glGetProgramInfoLog", |_: Cx, prog: i32, max: i32, len: i32, log_ptr: i32| {
         let p = with(|s| s.n(Kind::Program, prog as u32));
@@ -788,6 +830,11 @@ pub fn register(l: &mut Linker<Ctx>) -> Result<()> {
         }
         let n = with(|s| uniform_loc(s, loc));
         unsafe { gl::Uniform1iv(n, count, mem::ptr(v as u32) as *const i32) };
+        if crate::glstats::on() {
+            let mut p = 0;
+            unsafe { gl::GetIntegerv(gl::CURRENT_PROGRAM, &mut p) };
+            crate::glstats::uniforms_changed(p as u32);
+        }
     })?;
     l.func_wrap("env", "glUniform4iv", |_: Cx, loc: i32, count: i32, v: i32| {
         if count == 0 {
@@ -821,6 +868,9 @@ pub fn register(l: &mut Linker<Ctx>) -> Result<()> {
     l.func_wrap("env", "glFramebufferTexture2D", |_: Cx, target: i32, att: i32, textarget: i32, tex: i32, level: i32| {
         let n = with(|s| s.n(Kind::Texture, tex as u32));
         unsafe { gl::FramebufferTexture2D(target as u32, att as u32, textarget as u32, n, level) };
+        if crate::glstats::on() {
+            crate::glstats::attach(target as u32, att as u32, n);
+        }
     })?;
     l.func_wrap("env", "glCheckFramebufferStatus", |_: Cx, t: i32| -> i32 { unsafe { gl::CheckFramebufferStatus(t as u32) as i32 } })?;
     l.func_wrap(
@@ -865,7 +915,10 @@ pub fn register(l: &mut Linker<Ctx>) -> Result<()> {
     // --- textures ----------------------------------------------------------------------------------
     l.func_wrap("env", "glTexParameteri", |_: Cx, t: i32, p: i32, v: i32| unsafe { gl::TexParameteri(t as u32, p as u32, v) })?;
     l.func_wrap("env", "glTexStorage2D", |_: Cx, t: i32, levels: i32, fmt: i32, w: i32, h: i32| unsafe {
-        gl::TexStorage2D(t as u32, levels, fmt as u32, w, h)
+        gl::TexStorage2D(t as u32, levels, fmt as u32, w, h);
+        if crate::glstats::on() {
+            crate::glstats::tex_storage(t as u32, fmt as u32, w, h);
+        }
     })?;
     l.func_wrap("env", "glTexStorage3D", |_: Cx, t: i32, levels: i32, fmt: i32, w: i32, h: i32, d: i32| unsafe {
         gl::TexStorage3D(t as u32, levels, fmt as u32, w, h, d)
@@ -888,7 +941,7 @@ pub fn register(l: &mut Linker<Ctx>) -> Result<()> {
         "env",
         "glCompressedTexSubImage2D",
         |_: Cx, t: i32, lvl: i32, x: i32, y: i32, w: i32, h: i32, fmt: i32, size: i32, data: i32| unsafe {
-            gl::CompressedTexSubImage2D(t as u32, lvl, x, y, w, h, fmt as u32, size, mem::ptr_or_null(data as u32))
+            gl::CompressedTexSubImage2D(t as u32, lvl, x, y, w, h, fmt as u32, size, mem::ptr_or_null(data as u32));
         },
     )?;
     l.func_wrap("env", "glPixelStorei", |_: Cx, p: i32, v: i32| {

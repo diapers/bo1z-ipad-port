@@ -20,6 +20,13 @@ use crate::{gl_ctx, log, rt, Launcher};
 static BACK_TO_MENU: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Ask the UI thread to leave the game for the map select.
+/// Debug: BO1Z_NOINPUT=1 ignores the real mouse and keyboard and never captures the cursor,
+/// for scripted runs (BO1Z_FAKEPAD) on a desktop someone is using.
+fn no_real_input() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("BO1Z_NOINPUT").is_some())
+}
+
 pub fn return_to_menu() {
     if !BACK_TO_MENU.swap(true, std::sync::atomic::Ordering::Relaxed) {
         log::info("game quit: returning to the map select");
@@ -306,6 +313,11 @@ impl App {
     }
 
     fn set_grab(&mut self, on: bool) {
+        if no_real_input() {
+            self.grabbed = on;
+            self.send((input::LOCK, on as i32, 0));
+            return;
+        }
         let Some(w) = self.window.as_ref() else { return };
         if on {
             let ok = w.set_cursor_grab(CursorGrabMode::Locked).or_else(|_| w.set_cursor_grab(CursorGrabMode::Confined));
@@ -401,13 +413,15 @@ impl App {
             if let Some(w) = self.window.as_ref() {
                 let s = w.inner_size();
                 let c = winit::dpi::PhysicalPosition::new(s.width as f64 / 2.0, s.height as f64 / 2.0);
-                let _ = w.set_cursor_position(c);
+                if !no_real_input() {
+                    let _ = w.set_cursor_position(c);
+                }
                 self.cursor = (c.x, c.y);
                 rt::post_input(input::CURSOR, c.x as i32, c.y as i32);
             }
         } else if !menu && self.regrab {
             self.regrab = false;
-            if self.window.as_ref().is_some_and(|w| w.has_focus()) {
+            if no_real_input() || self.window.as_ref().is_some_and(|w| w.has_focus()) {
                 self.set_grab(true);
             }
         }
@@ -432,6 +446,19 @@ impl ApplicationHandler<()> for App {
 
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, ev: WindowEvent) {
         self.event_loop = Some(el as *const _);
+        if no_real_input()
+            && matches!(
+                ev,
+                WindowEvent::KeyboardInput { .. }
+                    | WindowEvent::MouseInput { .. }
+                    | WindowEvent::MouseWheel { .. }
+                    | WindowEvent::CursorMoved { .. }
+                    | WindowEvent::Touch(_)
+                    | WindowEvent::Focused(_)
+            )
+        {
+            return;
+        }
         match ev {
             WindowEvent::CloseRequested => quit(0),
             WindowEvent::Focused(false) => {
@@ -546,6 +573,9 @@ impl ApplicationHandler<()> for App {
     }
 
     fn device_event(&mut self, _el: &ActiveEventLoop, _id: DeviceId, ev: DeviceEvent) {
+        if no_real_input() {
+            return;
+        }
         if let DeviceEvent::MouseMotion { delta } = ev {
             if self.grabbed {
                 self.send((input::MOUSE, delta.0 as i32, delta.1 as i32));

@@ -60,17 +60,23 @@ pub fn create(lib: &Path, window: *mut std::ffi::c_void) -> Result<()> {
     // and streams levels in later), and on Metal the undefined memory is garbage that
     // samples as blocky BC-decoded noise. ANGLE's robust resource init restores WebGL's rule.
     const ROBUST_RESOURCE_INITIALIZATION_ANGLE: egl::Int = 0x3453;
-    let robust_init = egl
-        .query_string(Some(display), egl::EXTENSIONS)
-        .map(|s| s.to_string_lossy().split(' ').any(|e| e == "EGL_ANGLE_robust_resource_initialization"))
-        .unwrap_or(false);
+    const CONTEXT_OPENGL_NO_ERROR_KHR: egl::Int = 0x31B3;
+    let egl_exts = egl.query_string(Some(display), egl::EXTENSIONS).map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let has_ext = |name: &str| egl_exts.split(' ').any(|e| e == name);
+    let robust_init = has_ext("EGL_ANGLE_robust_resource_initialization");
+    // The engine makes no GL errors (checked per frame with BO1Z_GLSTATS across loading and
+    // play), so ANGLE's per-call validation is pure CPU cost: skip it, except when debugging.
+    let no_error = has_ext("EGL_KHR_create_context_no_error") && !crate::glstats::on();
     let mut ctx_attrs = vec![egl::CONTEXT_MAJOR_VERSION, 3, egl::CONTEXT_MINOR_VERSION, 0];
     if robust_init {
         ctx_attrs.extend([ROBUST_RESOURCE_INITIALIZATION_ANGLE, egl::TRUE as egl::Int]);
     }
+    if no_error {
+        ctx_attrs.extend([CONTEXT_OPENGL_NO_ERROR_KHR, egl::TRUE as egl::Int]);
+    }
     ctx_attrs.push(egl::NONE);
     let context = egl.create_context(display, config, None, &ctx_attrs)?;
-    log::info(&format!("robust resource initialization: {robust_init}"));
+    log::info(&format!("robust resource initialization: {robust_init}, no-error context: {no_error}"));
     // Paint the window black right away: the engine draws nothing until its core
     // fastfiles are loaded, and an untouched surface shows as white.
     egl.make_current(display, Some(surface), Some(surface), Some(context))?;
@@ -195,6 +201,13 @@ pub fn set_requested_size(w: i32, h: i32) {
 
 static FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+static SHOT_REQUEST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Debug: save the next presented frame (BO1Z_FAKEPAD "<t>:shot").
+pub fn request_shot() {
+    SHOT_REQUEST.store(true, Ordering::Relaxed);
+}
+
 static SHOT_T: std::sync::Mutex<Option<(std::time::Instant, Vec<f32>)>> = std::sync::Mutex::new(None);
 
 /// Debug: BO1Z_SHOT="600,1200" saves those presented frames as BMP into the data dir;
@@ -213,7 +226,8 @@ pub fn before_present(data_dir: &Path) {
         due.retain(|&t| t > now);
         due.len() != before
     };
-    if !by_frame && !by_time {
+    let by_request = SHOT_REQUEST.swap(false, Ordering::Relaxed);
+    if !by_frame && !by_time && !by_request {
         return;
     }
     let (w, h) = surface_size();

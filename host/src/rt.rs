@@ -649,6 +649,9 @@ fn event_loop(store: &mut Store<Ctx>) {
             if let Some(dir) = rt().paths.opfs_root.parent() {
                 gl_ctx::before_present(dir);
             }
+            if crate::glstats::on() {
+                crate::glstats::frame_errors();
+            }
             gl_ctx::swap();
         } else if ml.mode == 1 {
             std::thread::sleep(Duration::from_millis(16));

@@ -179,3 +179,22 @@ Build 4 runs on the iPad (Five playable). Issues from the screen recording + use
 - Build 20548b0 (CI run 38240728800): crash fix + cinematic flow -> D:o1z\BO1Z-all.ipa (6.73 GB). Awaiting device test.
 - Build 20548b0 on iPad: maps load and start, then abort ~1 s in: engine assert cl_gamepad.cpp:744 |axisDeflection| <= 1 (CL_GamepadAxisValue). iOS GameController sticks are square ((1,1) at diagonals); input.rs now clamps sticks to the unit circle (0.999) and triggers to [0,1]. Reproduced + verified on PC with BO1Z_FAKEPAD diagonals.
 - log.rs keeps the previous run as bo1z-previous.log.
+
+## 2026-10-12: iPad black patches, pause-menu pad, performance
+- iPad (c0cbe72) still showed black blocks/stripes over surfaces (Moon, Five) and stutter.
+  Ruled out on PC: shadow maps (the 1024x2048/512x2048 depth textures are never rendered or
+  sampled; units 12/13 are the DXT1 sun-visibility + RGBA lightmaps), float depth, feedback
+  loops (none), GL errors (none). The engine does a depth prepass (~650 colour-masked draws a
+  frame) and draws colour/decals with LEQUAL from other programs; Metal compiles each program's
+  vertex stage separately and may round positions differently -> depth test fails in blocks.
+  Fix: gl.rs injects `invariant gl_Position;` into every vertex shader; iOS runs with
+  `r_depthPrepass 0` (Apple GPUs remove hidden surfaces in hardware; ~20% fewer draws).
+  PC debug: 32 -> ~42-47 fps in the same spot. Awaiting device confirmation.
+- EGL context with KHR_no_error (no ANGLE validation per call) unless BO1Z_GLSTATS is set.
+- The engine already compiles programs asynchronously (polls COMPLETION_STATUS_KHR).
+- Pause menu with a pad: the engine's menus take arrows/Enter/Escape; DPAD_* keys only hit
+  gameplay binds (+actionslot). In menus the mapper now sends D-pad/left stick -> arrows (with
+  hold-repeat), A -> Enter, B -> Escape, Start -> togglemenu. Buttons held across a menu
+  open/close are ignored until released (Start no longer double-fires).
+- Debug: BO1Z_NOINPUT=1 (ignore real mouse/keyboard, never grab), FAKEPAD "<t>:shot",
+  BO1Z_ARGS="+set ...", BO1Z_GLSTATS=1, BO1Z_SHADERDUMP=<dir>.

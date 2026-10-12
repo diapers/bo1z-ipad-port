@@ -10,6 +10,7 @@
 //! CL_GamepadAxisValue) and must be re-derived if the engine binary changes.
 
 use std::collections::HashSet;
+use std::time::{Duration, Instant};
 
 use crate::mem;
 
@@ -22,6 +23,12 @@ pub const INTRO: i32 = 7;
 
 /// Engine key numbers (keynames table).
 pub mod key {
+    pub const ENTER: i32 = 13;
+    pub const ESCAPE: i32 = 27;
+    pub const UPARROW: i32 = 154;
+    pub const DOWNARROW: i32 = 155;
+    pub const LEFTARROW: i32 = 156;
+    pub const RIGHTARROW: i32 = 157;
     pub const BUTTON_A: i32 = 1;
     pub const BUTTON_B: i32 = 2;
     pub const BUTTON_X: i32 = 3;
@@ -183,9 +190,21 @@ pub type Event = (i32, i32, i32);
 
 /// Trigger travel that counts as a BUTTON_LTRIG/RTRIG press (gpad_button_deadzone-like).
 const TRIGGER_PRESS: f32 = 0.3;
+/// Stick deflection that counts as a menu direction, and where it lets go again.
+const STICK_PRESS: f32 = 0.5;
+const STICK_RELEASE: f32 = 0.35;
+/// Held menu directions repeat like a keyboard: first after this delay, then at this rate.
+const REPEAT_FIRST: Duration = Duration::from_millis(400);
+const REPEAT_EVERY: Duration = Duration::from_millis(130);
 
 pub struct Mapper {
     held: HashSet<i32>,
+    /// Buttons held through a menu opening or closing: ignored until released, so the press
+    /// that changed the menu does not act again in the new context.
+    stale: HashSet<Btn>,
+    /// Menu direction keys held, with the time of their next repeat.
+    repeat: Vec<(i32, Instant)>,
+    stick_dir: [bool; 4],
     menu: Option<bool>,
     intro_released: bool,
     intro_armed: bool,
@@ -194,7 +213,43 @@ pub struct Mapper {
 
 impl Mapper {
     pub fn new() -> Self {
-        Self { held: HashSet::new(), menu: None, intro_released: false, intro_armed: false, was_connected: false }
+        Self {
+            held: HashSet::new(),
+            stale: HashSet::new(),
+            repeat: Vec::new(),
+            stick_dir: [false; 4],
+            menu: None,
+            intro_released: false,
+            intro_armed: false,
+            was_connected: false,
+        }
+    }
+
+    /// A menu direction: pressed once, then repeated while held.
+    fn nav(&mut self, out: &mut Vec<Event>, k: i32, down: bool) {
+        let now = Instant::now();
+        if down && !self.held.contains(&k) {
+            self.repeat.push((k, now + REPEAT_FIRST));
+        } else if down {
+            if let Some(r) = self.repeat.iter_mut().find(|r| r.0 == k) {
+                if now >= r.1 {
+                    r.1 = now + REPEAT_EVERY;
+                    out.push((KEY, k, 1));
+                }
+            }
+        } else {
+            self.repeat.retain(|r| r.0 != k);
+        }
+        self.set(out, k, down);
+    }
+
+    /// Left stick as four menu directions (up, down, left, right), with hysteresis.
+    fn stick_dirs(&mut self, pad: &PadState) -> [bool; 4] {
+        let axes = [pad.ly, -pad.ly, -pad.lx, pad.lx];
+        for (on, v) in self.stick_dir.iter_mut().zip(axes) {
+            *on = if *on { v > STICK_RELEASE } else { v > STICK_PRESS };
+        }
+        self.stick_dir
     }
 
     fn set(&mut self, out: &mut Vec<Event>, k: i32, down: bool) {
@@ -244,15 +299,38 @@ impl Mapper {
             }
         }
 
-        // Menus unlock the pointer; the engine's BrowserFrame gamepad cursor takes over.
+        // Menus unlock the pointer.
         if self.menu != Some(menu) {
             self.release_all(&mut out);
+            self.repeat.clear();
+            self.stale = pad.buttons.clone();
             out.push((LOCK, (!menu) as i32, 0));
             self.menu = Some(menu);
         }
+        self.stale.retain(|b| pad.buttons.contains(b));
+        let active: HashSet<Btn> = pad.buttons.difference(&self.stale).copied().collect();
+        let on = |b: Btn| active.contains(&b);
+
+        if menu {
+            // The engine's menus take arrows, Enter and Escape; the pad's DPAD_*/BUTTON_*
+            // keys only reach their gameplay binds there (DPAD_DOWN = +actionslot 2).
+            let [s_up, s_down, s_left, s_right] = self.stick_dirs(pad);
+            let (up, down, left, right) = (on(Btn::Up) || s_up, on(Btn::Down) || s_down, on(Btn::Left) || s_left, on(Btn::Right) || s_right);
+            let (a, b, start, back) = (on(Btn::A), on(Btn::B), on(Btn::Start), on(Btn::Back));
+            self.nav(&mut out, key::UPARROW, up);
+            self.nav(&mut out, key::DOWNARROW, down);
+            self.nav(&mut out, key::LEFTARROW, left);
+            self.nav(&mut out, key::RIGHTARROW, right);
+            self.set(&mut out, key::ENTER, a);
+            self.set(&mut out, key::ESCAPE, b);
+            // Start closes the pause menu (togglemenu), as on console.
+            self.set(&mut out, key::BUTTON_START, start);
+            self.set(&mut out, key::BUTTON_BACK, back);
+            return out;
+        }
 
         for b in Btn::ALL {
-            self.set(&mut out, b.key(), pad.buttons.contains(&b));
+            self.set(&mut out, b.key(), on(b));
         }
         self.set(&mut out, key::BUTTON_LTRIG, pad.lt > TRIGGER_PRESS);
         self.set(&mut out, key::BUTTON_RTRIG, pad.rt > TRIGGER_PRESS);
@@ -301,6 +379,7 @@ fn write_gpad(pad: &PadState) {
 // Debug: BO1Z_FAKEPAD scripts a virtual controller on desktop, for testing without one.
 // Format: "<seconds>:<input>[=<value>];..." where input is a Btn name (A, Start, Down, ...)
 // or an axis (lx, ly, rx, ry, lt, rt). A button without "=0" is pressed; "=0" releases it.
+// "shot" saves a screenshot of the next frame.
 // Example: BO1Z_FAKEPAD="20:Start;20.2:Start=0;22:Down;22.2:Down=0;30:ly=1;32:ly=0"
 
 pub struct FakePad {
@@ -334,6 +413,7 @@ impl FakePad {
                 "ry" => s.ry = v,
                 "lt" => s.lt = v,
                 "rt" => s.rt = v,
+                "shot" => crate::gl_ctx::request_shot(),
                 b => {
                     if let Some(btn) = Btn::ALL.iter().find(|x| format!("{x:?}").eq_ignore_ascii_case(b)) {
                         if v != 0.0 {

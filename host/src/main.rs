@@ -10,6 +10,7 @@ mod emval;
 mod fs;
 mod gl;
 mod gl_ctx;
+mod glstats;
 mod imports;
 mod input;
 mod loading;
@@ -110,6 +111,14 @@ fn engine_args(size: (i32, i32), zone: &str, opfs_root: &str) -> Vec<String> {
     a.extend(["+set".into(), "snd_softwaretable".into(), format!("{opfs_root}/web/sound")]);
     a.extend(["+set", "r_smp_backend", "0", "+set", "sensitivity", "5", "+set", "snd_menu_master", "0.8"].map(String::from));
     a.extend(["+set".into(), "r_customMode".into(), format!("{}x{}", size.0, size.1)]);
+    // Apple GPUs drop hidden surfaces in hardware: the depth-only prepass is ~650 extra draws
+    // a frame of pure CPU cost there, and the passes after it depend on matching its depth.
+    #[cfg(target_os = "ios")]
+    a.extend(["+set", "r_depthPrepass", "0"].map(String::from));
+    // Debug: BO1Z_ARGS="+set r_depthPrepass 0 ..." adds engine arguments.
+    if let Ok(extra) = std::env::var("BO1Z_ARGS") {
+        a.extend(extra.split_whitespace().map(String::from));
+    }
     a.extend(input::startup_args());
     a.extend(["+devmap".into(), zone.into()]);
     a
