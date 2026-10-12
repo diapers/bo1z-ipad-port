@@ -646,11 +646,6 @@ fn event_loop(store: &mut Store<Ctx>) {
         }
         // OffscreenCanvas commit: the frame presents when the worker yields.
         if store.data().gl_current {
-            #[cfg(not(target_os = "ios"))]
-            {
-                let (sw, sh) = gl_ctx::surface_size();
-                crate::loading::draw(sw, sh);
-            }
             if let Some(dir) = rt().paths.opfs_root.parent() {
                 gl_ctx::before_present(dir);
             }

@@ -187,7 +187,8 @@ impl Launcher {
     pub fn boot(&self, m: &maps::MapInfo, size: (i32, i32)) -> Result<rt::Boot> {
         log::info(&format!("map {} ({}); game {}; wasm {}", m.slug, m.zone, self.game.display(), self.wasm.display()));
         let (mount, ff_bytes) = m.mount(&self.game)?;
-        loading::init(ff_bytes, m.zone);
+        let _ = ff_bytes;
+        loading::init(m.zone);
         let _ = std::fs::write(self.data.join("map.txt"), m.slug);
         // maps.js: Five lives in OPFS "pack", every other map in "pack-<slug>".
         let opfs_dir = if m.slug == "five" { "pack".to_string() } else { format!("pack-{}", m.slug) };

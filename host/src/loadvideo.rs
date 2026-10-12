@@ -1,12 +1,8 @@
-//! Desktop loading cinematic: the map's web/video/<zone>_load video (converted to
-//! <game>/menu/load-<slug>.mp4 by convert-videos.mjs), played in a child window laid over
-//! the game window with its own EGL surface and context, so it runs smoothly while the
-//! engine thread owns the game window's context and barely presents.
-//!
-//! Decoding is ffmpeg on PATH (development only; iOS plays the same MP4 with AVPlayer):
-//! one process for rgb24 frames, one for f32 audio at the output device's rate. The
-//! loading bar and status line are drawn over the video; after the video ends its last
-//! frame stays until the player starts.
+//! Desktop loading cinematic: the map's <menu>/load-<slug>.mp4 (convert-videos.mjs)
+//! decoded by ffmpeg on PATH (development only; iOS plays the same file with AVPlayer) and
+//! drawn with GDI into a borderless child window over the game window. GDI, not a second
+//! GL context: ANGLE crashes when the UI thread and the engine thread render through two
+//! contexts at once. Audio goes to its own cpal stream.
 
 use std::io::Read;
 use std::path::Path;
@@ -17,7 +13,6 @@ use std::time::Instant;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-use crate::gl_ctx::Aux;
 use crate::log;
 
 const W: i32 = 854;
@@ -25,13 +20,12 @@ const H: i32 = 480;
 const FPS: f64 = 29.97;
 
 pub struct LoadVideo {
-    aux: Aux,
+    hwnd: isize,
     frames: Receiver<Vec<u8>>,
+    current: Option<Vec<u8>>,
     video_proc: Child,
     audio_proc: Option<Child>,
     _audio: Option<SendStream>,
-    tex: u32,
-    fbo: u32,
     start: Instant,
     shown: u64,
     ended: bool,
@@ -47,14 +41,14 @@ impl LoadVideo {
         let mut video_proc = Command::new("ffmpeg")
             .args(["-loglevel", "error", "-i"])
             .arg(video)
-            .args(["-an", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", &format!("{W}x{H}"), "-"])
+            .args(["-an", "-f", "rawvideo", "-pix_fmt", "bgra", "-s", &format!("{W}x{H}"), "-"])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()?;
         let mut out = video_proc.stdout.take().ok_or_else(|| anyhow::anyhow!("no ffmpeg stdout"))?;
         let (tx, frames) = sync_channel::<Vec<u8>>(8);
         std::thread::Builder::new().name("loadvideo-frames".into()).spawn(move || loop {
-            let mut buf = vec![0u8; (W * H * 3) as usize];
+            let mut buf = vec![0u8; (W * H * 4) as usize];
             if out.read_exact(&mut buf).is_err() || tx.send(buf).is_err() {
                 break;
             }
@@ -66,59 +60,79 @@ impl LoadVideo {
                 (None, None)
             }
         };
-
-        let aux = Aux::new(window)?;
-        aux.make_current()?;
-        let (mut tex, mut fbo) = (0, 0);
-        unsafe {
-            gl::GenTextures(1, &mut tex);
-            gl::BindTexture(gl::TEXTURE_2D, tex);
-            gl::TexImage2D(gl::TEXTURE_2D, 0, gl::RGB as i32, W, H, 0, gl::RGB, gl::UNSIGNED_BYTE, std::ptr::null());
-            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::LINEAR as i32);
-            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR as i32);
-            gl::GenFramebuffers(1, &mut fbo);
-        }
         log::info(&format!("loading video: {}", video.display()));
-        Ok(Self { aux, frames, video_proc, audio_proc, _audio: audio, tex, fbo, start: Instant::now(), shown: 0, ended: false })
+        Ok(Self {
+            hwnd: window as isize,
+            frames,
+            current: None,
+            video_proc,
+            audio_proc,
+            _audio: audio,
+            start: Instant::now(),
+            shown: 0,
+            ended: false,
+        })
     }
 
-    /// Advance to the frame due now and redraw (UI thread, every tick).
-    pub fn tick(&mut self) {
-        if self.aux.make_current().is_err() {
-            return;
-        }
+    /// Advance to the frame due now and paint it (UI thread, every tick). Returns true once
+    /// the video has played to its end.
+    pub fn tick(&mut self) -> bool {
         let due = (self.start.elapsed().as_secs_f64() * FPS) as u64 + 1;
-        let mut latest = None;
         while !self.ended && self.shown < due {
             match self.frames.try_recv() {
                 Ok(f) => {
                     self.shown += 1;
-                    latest = Some(f);
+                    self.current = Some(f);
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => self.ended = true,
             }
         }
+        self.paint();
+        self.ended
+    }
+
+    fn paint(&self) {
+        use windows_sys::Win32::Foundation::{HWND, RECT};
+        use windows_sys::Win32::Graphics::Gdi::*;
+        use windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect;
+        let hwnd = self.hwnd as HWND;
         unsafe {
-            gl::BindTexture(gl::TEXTURE_2D, self.tex);
-            if let Some(f) = latest {
-                gl::PixelStorei(gl::UNPACK_ALIGNMENT, 1);
-                gl::TexSubImage2D(gl::TEXTURE_2D, 0, 0, 0, W, H, gl::RGB, gl::UNSIGNED_BYTE, f.as_ptr() as *const _);
+            let mut rc: RECT = std::mem::zeroed();
+            GetClientRect(hwnd, &mut rc);
+            let (w, h) = (rc.right - rc.left, rc.bottom - rc.top);
+            let hdc = GetDC(hwnd);
+            if hdc.is_null() {
+                return;
             }
-        }
-        let (w, h) = self.aux.size();
-        let fbo = self.fbo;
-        crate::loading::draw_over(w, h, || unsafe {
-            gl::BindFramebuffer(gl::READ_FRAMEBUFFER, fbo);
-            gl::FramebufferTexture2D(gl::READ_FRAMEBUFFER, gl::COLOR_ATTACHMENT0, gl::TEXTURE_2D, self.tex, 0);
-            gl::BindFramebuffer(gl::DRAW_FRAMEBUFFER, 0);
+            // 16:9 letterbox, black bars.
             let s = crate::menu::Menu::stage(w as f32, h as f32);
-            let (x0, x1) = (s.x.round() as i32, (s.x + s.w).round() as i32);
-            let (y_top, y_bot) = (h - s.y.round() as i32, h - (s.y + s.h).round() as i32);
-            gl::BlitFramebuffer(0, 0, W, H, x0, y_top, x1, y_bot, gl::COLOR_BUFFER_BIT, gl::LINEAR);
-            gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
-        });
-        self.aux.swap();
+            let (x, y, sw, sh) = (s.x as i32, s.y as i32, s.w as i32, s.h as i32);
+            let black = GetStockObject(BLACK_BRUSH);
+            for r in [
+                RECT { left: 0, top: 0, right: w, bottom: y },
+                RECT { left: 0, top: y + sh, right: w, bottom: h },
+                RECT { left: 0, top: 0, right: x, bottom: h },
+                RECT { left: x + sw, top: 0, right: w, bottom: h },
+            ] {
+                FillRect(hdc, &r, black as HBRUSH);
+            }
+            if let Some(f) = &self.current {
+                let mut bmi: BITMAPINFO = std::mem::zeroed();
+                bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+                bmi.bmiHeader.biWidth = W;
+                bmi.bmiHeader.biHeight = -H; // top-down rows
+                bmi.bmiHeader.biPlanes = 1;
+                bmi.bmiHeader.biBitCount = 32;
+                bmi.bmiHeader.biCompression = BI_RGB as u32;
+                SetStretchBltMode(hdc, HALFTONE);
+                StretchDIBits(hdc, x, y, sw, sh, 0, 0, W, H, f.as_ptr() as *const _, &bmi, DIB_RGB_COLORS, SRCCOPY);
+            } else {
+                let r = RECT { left: x, top: y, right: x + sw, bottom: y + sh };
+                FillRect(hdc, &r, black as HBRUSH);
+            }
+            ReleaseDC(hwnd, hdc);
+        }
     }
 }
 
@@ -127,12 +141,6 @@ impl Drop for LoadVideo {
         let _ = self.video_proc.kill();
         if let Some(p) = self.audio_proc.as_mut() {
             let _ = p.kill();
-        }
-        if self.aux.make_current().is_ok() {
-            unsafe {
-                gl::DeleteTextures(1, &self.tex);
-                gl::DeleteFramebuffers(1, &self.fbo);
-            }
         }
     }
 }

@@ -241,6 +241,7 @@ dependencies = [
  "raw-window-handle",
  "serde_json",
  "wasmtime",
+ "windows-sys 0.59.0",
  "winit",
 ]
 

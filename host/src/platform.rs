@@ -86,7 +86,7 @@ pub struct App {
     started: Instant,
     autoplay: Option<f32>,
     #[cfg(target_os = "ios")]
-    loading_overlay: Option<crate::loading::Overlay>,
+    video_overlay: Option<crate::loading::VideoOverlay>,
 }
 
 impl App {
@@ -114,7 +114,7 @@ impl App {
             // Debug: BO1Z_AUTOPLAY=<seconds> releases the intro gate without input.
             autoplay: std::env::var("BO1Z_AUTOPLAY").ok().and_then(|s| s.parse().ok()),
             #[cfg(target_os = "ios")]
-            loading_overlay: None,
+            video_overlay: None,
         }
     }
 
@@ -145,30 +145,31 @@ impl App {
         Ok(())
     }
 
-    /// Boot the engine with the chosen map, behind the loading bar.
+    /// Boot the engine with the chosen map, with its loading cinematic playing on top.
+    /// Order matters: the map is set up first, then the video starts, then the engine.
     fn launch(&mut self, m: MapInfo) -> anyhow::Result<()> {
+        // Render at the drawing-buffer size (engine.js passes the canvas size the same way).
+        let boot = self.launcher.boot(&m, gl_ctx::surface_size())?;
+        let video = self.launcher.menu_dir().join(format!("load-{}.mp4", m.slug));
+        crate::loading::set_video(video.is_file().then_some(video));
         #[cfg(target_os = "ios")]
         {
             if let Some(o) = self.menu_overlay.take() {
                 o.remove();
             }
-            self.loading_overlay = self.window.as_ref().and_then(game_view).and_then(|v| crate::loading::Overlay::new(&v));
+            self.video_overlay = match (crate::loading::video(), self.window.as_ref().and_then(game_view)) {
+                (Some(v), Some(view)) => crate::loading::VideoOverlay::new(&view, &v),
+                _ => None,
+            };
         }
-        // The map's loading cinematic, its still loading screen, else its map-select panel.
-        let video = self.launcher.menu_dir().join(format!("load-{}.mp4", m.slug));
-        crate::loading::set_video(video.is_file().then_some(video));
-        let screen = self.launcher.menu_dir().join(format!("loadscreen-{}.png", m.slug));
-        crate::loading::set_panel(if screen.is_file() {
-            Some(screen)
-        } else {
-            self.menu.as_ref().and_then(|menu| menu.art_file("panel", Some(m.slug)))
-        });
         #[cfg(not(target_os = "ios"))]
         {
-            // Show the loading screen right away; the engine draws nothing for a while.
-            let (w, h) = gl_ctx::surface_size();
+            // The menu drew on the UI thread; the engine thread takes the context now.
             if gl_ctx::make_current().is_ok() {
-                crate::loading::draw(w, h);
+                unsafe {
+                    gl::ClearColor(0.0, 0.0, 0.0, 1.0);
+                    gl::Clear(gl::COLOR_BUFFER_BIT);
+                }
                 gl_ctx::swap();
             }
             gl_ctx::release_current();
@@ -178,8 +179,6 @@ impl App {
             }
         }
         self.menu = None;
-        // Render at the drawing-buffer size (engine.js passes the canvas size the same way).
-        let boot = self.launcher.boot(&m, gl_ctx::surface_size())?;
         rt::start_browser_main(boot);
         self.booted = true;
         Ok(())
@@ -209,10 +208,7 @@ impl App {
         };
         let native = native_window(&child).ok()?;
         match crate::loadvideo::LoadVideo::start(native, &video) {
-            Ok(v) => {
-                crate::loading::set_video_active(true);
-                Some((child, v))
-            }
+            Ok(v) => Some((child, v)),
             Err(e) => {
                 log::error(&format!("loading video: {e}"));
                 None
@@ -254,12 +250,35 @@ impl App {
         }
     }
 
+    /// Remove the loading cinematic, if it is still up.
+    fn end_video(&mut self) {
+        #[cfg(not(target_os = "ios"))]
+        if self.load_video.take().is_some() {
+            // Dropping stops ffmpeg and destroys the child window.
+            if let Some(w) = self.window.as_ref() {
+                w.focus_window();
+            }
+        }
+        #[cfg(target_os = "ios")]
+        if let Some(o) = self.video_overlay.take() {
+            o.remove();
+        }
+    }
+
+    fn video_running(&self) -> bool {
+        #[cfg(not(target_os = "ios"))]
+        return self.load_video.is_some();
+        #[cfg(target_os = "ios")]
+        return self.video_overlay.is_some();
+    }
+
     /// The map has loaded and the loading screen asks the player to start.
     fn waiting_to_start(&self) -> bool {
         self.booted && crate::loading::done() && !crate::loading::is_released()
     }
 
     fn start_game(&mut self) {
+        self.end_video();
         rt::post_input(input::INTRO, 1, 0);
         #[cfg(not(target_os = "ios"))]
         if !self.grabbed {
@@ -299,22 +318,31 @@ impl App {
     }
 
     fn tick(&mut self) {
+        // The loading cinematic: removed when it ends or once the game has started.
         #[cfg(not(target_os = "ios"))]
-        if let Some((child, v)) = self.load_video.as_mut() {
-            if crate::loading::is_released() {
-                crate::loading::set_video_active(false);
-                self.load_video = None; // stops ffmpeg, destroys the child window
-                if let Some(w) = self.window.as_ref() {
-                    w.focus_window();
-                }
-            } else {
+        let ended = match self.load_video.as_mut() {
+            Some((child, v)) => {
                 if let Some(p) = self.window.as_ref().map(|w| w.inner_size()) {
                     if child.inner_size() != p {
                         let _ = child.request_inner_size(p);
                     }
                 }
-                v.tick();
+                v.tick() || crate::loading::is_released()
             }
+            None => false,
+        };
+        #[cfg(target_os = "ios")]
+        let ended = match self.video_overlay.as_mut() {
+            Some(o) => o.tick() || crate::loading::is_released(),
+            None => false,
+        };
+        if ended {
+            log::info("loading video finished");
+            self.end_video();
+        }
+        // Like the site: once the map has loaded and the video is gone, the game starts.
+        if self.waiting_to_start() && !self.video_running() {
+            self.start_game();
         }
         if BACK_TO_MENU.load(std::sync::atomic::Ordering::Relaxed) {
             restart_to_menu();
@@ -339,10 +367,6 @@ impl App {
             }
             self.draw_menu();
             return;
-        }
-        #[cfg(target_os = "ios")]
-        if self.loading_overlay.as_ref().is_some_and(|o| !o.update()) {
-            self.loading_overlay = None;
         }
         if !self.booted || !rt::ready() {
             return;

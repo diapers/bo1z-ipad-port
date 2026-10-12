@@ -23,6 +23,9 @@ cpal = "0.15"
 [target.'cfg(not(target_os = "ios"))'.dependencies]
 gilrs = "0.11"
 image-webp = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging"] }
 png = "0.18"
 
 [target.'cfg(target_os = "ios")'.dependencies]

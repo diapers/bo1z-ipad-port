@@ -169,3 +169,10 @@ Build 4 runs on the iPad (Five playable). Issues from the screen recording + use
   LOADING, then PRESS A TO START; the intro gate (KB_Input 7) only opens after load on a fresh press.
 - Pause-menu Quit logs Com_LoadFrontEnd (no front end in this build): desktop relaunches into the
   map select; iOS exits (cannot spawn) -> reopen lands on the map select.
+- 2026-10-12 device crash on map pick: loading overlay was created before loading::init, so
+  progress = 0/0 = NaN -> UIView setFrame NaN -> CALayer exception (SIGABRT). Fixed; overlay removed.
+- Loading flow now: cinematic only (no bar/text), removed when it ends -> the engine's own
+  loadscreen shows; game auto-starts once loaded and the video is gone (press skips a video
+  still running after load). Desktop video drawn with GDI: a second ANGLE GL context on the UI
+  thread crashed (segfault) alongside the engine's context.
+- Test the iPad data layout on PC: D:\bo1z\idx-game (maps/*.json + junctions store, menu).
