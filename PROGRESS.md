@@ -228,3 +228,4 @@ Build 4 runs on the iPad (Five playable). Issues from the screen recording + use
   verruckt 511, shinonuma 369, ascension 547, cotd 364, shangrila 369, moon 444 programs.
 - PC fresh-install test (Five, empty caches, shipped lists): pending draws after spawn 0
   (was 377). Remaining early hitch: ~60 MB texture streaming in the first 10 s (read MB column).
+- Build 50692cb (CI run 38337316215) -> D:\bo1z\BO1Z-all.ipa (6.76 GB) with shader lists + manifests for all 10 maps. Awaiting device test + bo1z.log.
