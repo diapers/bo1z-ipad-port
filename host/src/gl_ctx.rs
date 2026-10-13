@@ -18,6 +18,9 @@ struct Ctx {
     config: egl::Config,
     surface: egl::Surface,
     context: egl::Context,
+    /// Attributes the engine's context was created with; shared contexts must match (ANGLE
+    /// keys its program cache on them).
+    attrs: Vec<egl::Int>,
 }
 // EGL handles are opaque pointers that EGL itself lets any thread use.
 unsafe impl Send for Ctx {}
@@ -41,6 +44,16 @@ pub fn create(lib: &Path, window: *mut std::ffi::c_void) -> Result<()> {
         egl.query_string(Some(display), egl::VERSION).map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
     ));
     egl.bind_api(egl::OPENGL_ES_API)?;
+    let has_display_ext = |name: &str| {
+        egl.query_string(Some(display), egl::EXTENSIONS).is_ok_and(|s| s.to_string_lossy().split(' ').any(|e| e == name))
+    };
+    if has_display_ext("EGL_ANDROID_blob_cache") {
+        if let Some(f) = egl.get_proc_address("eglSetBlobCacheFuncsANDROID") {
+            crate::blobcache::install(f as *const std::ffi::c_void, display.as_ptr());
+        }
+    } else {
+        log::info("no EGL_ANDROID_blob_cache: programs are rebuilt every launch");
+    }
     const OPENGL_ES3_BIT: egl::Int = 0x40;
     let attrs = [
         egl::RED_SIZE, 8,
@@ -93,7 +106,7 @@ pub fn create(lib: &Path, window: *mut std::ffi::c_void) -> Result<()> {
     }
     let _ = egl.swap_buffers(display, surface);
     egl.make_current(display, None, None, None)?;
-    CTX.set(Ctx { egl, display, config, surface, context }).map_err(|_| anyhow!("EGL context created twice"))?;
+    CTX.set(Ctx { egl, display, config, surface, context, attrs: ctx_attrs }).map_err(|_| anyhow!("EGL context created twice"))?;
     Ok(())
 }
 
@@ -123,52 +136,25 @@ pub fn make_current() -> Result<bool> {
     Ok(true)
 }
 
-/// A second window surface with its own (unshared) context, driven from the UI thread
-/// while the engine thread owns the main one (desktop loading video).
-pub struct Aux {
-    surface: egl::Surface,
-    context: egl::Context,
-}
-
-impl Aux {
-    pub fn new(window: *mut std::ffi::c_void) -> Result<Self> {
-        let c = ctx()?;
-        let surface = unsafe { c.egl.create_window_surface(c.display, c.config, window as egl::NativeWindowType, None)? };
-        let attrs = [egl::CONTEXT_MAJOR_VERSION, 3, egl::CONTEXT_MINOR_VERSION, 0, egl::NONE];
-        let context = c.egl.create_context(c.display, c.config, None, &attrs)?;
-        Ok(Self { surface, context })
+/// A context sharing objects with the engine's, current on the calling thread (no surface:
+/// EGL_KHR_surfaceless_context, else a 1x1 pbuffer). For building programs in the background.
+pub fn make_worker_current() -> Result<()> {
+    let c = ctx()?;
+    let context = c.egl.create_context(c.display, c.config, Some(c.context), &c.attrs)?;
+    let surfaceless = c
+        .egl
+        .query_string(Some(c.display), egl::EXTENSIONS)
+        .is_ok_and(|s| s.to_string_lossy().split(' ').any(|e| e == "EGL_KHR_surfaceless_context"));
+    let surface = if surfaceless {
+        None
+    } else {
+        Some(c.egl.create_pbuffer_surface(c.display, c.config, &[egl::WIDTH, 1, egl::HEIGHT, 1, egl::NONE])?)
+    };
+    c.egl.make_current(c.display, surface, surface, Some(context))?;
+    if !LOADED.swap(true, Ordering::AcqRel) {
+        gl::load_with(|name| c.egl.get_proc_address(name).map_or(std::ptr::null(), |f| f as *const _));
     }
-
-    pub fn make_current(&self) -> Result<()> {
-        let c = ctx()?;
-        c.egl.make_current(c.display, Some(self.surface), Some(self.surface), Some(self.context))?;
-        let _ = c.egl.swap_interval(c.display, 0);
-        Ok(())
-    }
-
-    pub fn size(&self) -> (i32, i32) {
-        let Ok(c) = ctx() else { return (0, 0) };
-        (
-            c.egl.query_surface(c.display, self.surface, egl::WIDTH).unwrap_or(0),
-            c.egl.query_surface(c.display, self.surface, egl::HEIGHT).unwrap_or(0),
-        )
-    }
-
-    pub fn swap(&self) {
-        if let Ok(c) = ctx() {
-            let _ = c.egl.swap_buffers(c.display, self.surface);
-        }
-    }
-}
-
-impl Drop for Aux {
-    fn drop(&mut self) {
-        if let Ok(c) = ctx() {
-            let _ = c.egl.make_current(c.display, None, None, None);
-            let _ = c.egl.destroy_context(c.display, self.context);
-            let _ = c.egl.destroy_surface(c.display, self.surface);
-        }
-    }
+    Ok(())
 }
 
 pub fn release_current() {

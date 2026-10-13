@@ -6,6 +6,7 @@
 
 mod aot;
 mod audio;
+mod blobcache;
 mod emval;
 mod fs;
 mod gl;
@@ -22,6 +23,7 @@ mod menu;
 mod mem;
 mod platform;
 mod rt;
+mod shadercache;
 mod video;
 
 use std::path::{Path, PathBuf};
@@ -136,6 +138,18 @@ fn data_dir() -> PathBuf {
     }
 }
 
+/// ANGLE's program cache: Library/Caches on iOS (kept across launches, not shown in Files).
+fn cache_dir() -> PathBuf {
+    #[cfg(target_os = "ios")]
+    {
+        std::env::var("HOME").map(|h| PathBuf::from(h).join("Library/Caches/angle")).unwrap_or_else(|_| data_dir().join("angle-cache"))
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        data_dir().join("angle-cache")
+    }
+}
+
 /// `bo1z_host --precompile <in.wasm> <out.cwasm> [--target <triple>]`: AOT-compile the
 /// engine with the exact runtime configuration (used by CI for the iOS build).
 fn precompile(args: &[String]) -> Result<()> {
@@ -198,6 +212,7 @@ impl Launcher {
         let (mount, ff_bytes) = m.mount(&self.game)?;
         let _ = ff_bytes;
         loading::init(m.zone);
+        shadercache::start(m.slug, &self.game, &self.data);
         let _ = std::fs::write(self.data.join("map.txt"), m.slug);
         // maps.js: Five lives in OPFS "pack", every other map in "pack-<slug>".
         let opfs_dir = if m.slug == "five" { "pack".to_string() } else { format!("pack-{}", m.slug) };
@@ -222,6 +237,7 @@ fn run() -> Result<()> {
     };
     let last = std::fs::read_to_string(o.data.join("map.txt")).ok().map(|s| s.trim().to_string());
     let menu = menu::Menu::new(found, last.as_deref(), &o.game.join("menu"));
+    blobcache::configure(cache_dir());
     let launcher = Launcher { game: o.game.clone(), wasm: o.wasm.clone(), data: o.data.clone() };
     let mut app = platform::App::new(o.egl.clone(), launcher, menu, direct);
     platform::run(&mut app)

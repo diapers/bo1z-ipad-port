@@ -55,6 +55,10 @@ struct State {
     current_program: u32,
     last_error: u32,
     extensions: Option<Vec<String>>,
+    /// Shader id -> (type, final source), and the sources attached to each program: what
+    /// shadercache.rs records at link time.
+    shader_src: HashMap<u32, (u32, String)>,
+    attached: HashMap<u32, Vec<(u32, String)>>,
 }
 
 static ST: Mutex<Option<State>> = Mutex::new(None);
@@ -69,6 +73,8 @@ fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
         current_program: 0,
         last_error: 0,
         extensions: None,
+        shader_src: HashMap::new(),
+        attached: HashMap::new(),
     });
     f(s)
 }
@@ -676,6 +682,7 @@ pub fn register(l: &mut Linker<Ctx>) -> Result<()> {
         }
         let native = with(|s| {
             s.programs.remove(&(id as u32));
+            s.attached.remove(&(id as u32));
             if s.current_program == id as u32 {
                 s.current_program = 0;
             }
@@ -693,7 +700,10 @@ pub fn register(l: &mut Linker<Ctx>) -> Result<()> {
         if id == 0 {
             return;
         }
-        if let Some(n) = with(|s| s.forget(Kind::Shader, id as u32)) {
+        if let Some(n) = with(|s| {
+            s.shader_src.remove(&(id as u32));
+            s.forget(Kind::Shader, id as u32)
+        }) {
             unsafe { gl::DeleteShader(n) };
         }
     })?;
@@ -719,6 +729,7 @@ pub fn register(l: &mut Linker<Ctx>) -> Result<()> {
         }
         let c = CString::new(src.replace('\0', " ")).unwrap_or_default();
         unsafe { gl::ShaderSource(native, 1, &c.as_ptr(), std::ptr::null()) };
+        with(|s| s.shader_src.insert(sh as u32, (ty as u32, src)));
     })?;
     l.func_wrap("env", "glCompileShader", |_: Cx, sh: i32| {
         let native = with(|s| s.n(Kind::Shader, sh as u32));
@@ -735,18 +746,27 @@ pub fn register(l: &mut Linker<Ctx>) -> Result<()> {
         }
     })?;
     l.func_wrap("env", "glAttachShader", |_: Cx, prog: i32, sh: i32| {
-        let (p, s) = with(|st| (st.n(Kind::Program, prog as u32), st.n(Kind::Shader, sh as u32)));
+        let (p, s) = with(|st| {
+            if let Some(src) = st.shader_src.get(&(sh as u32)).cloned() {
+                st.attached.entry(prog as u32).or_default().push(src);
+            }
+            (st.n(Kind::Program, prog as u32), st.n(Kind::Shader, sh as u32))
+        });
         unsafe { gl::AttachShader(p, s) };
     })?;
     l.func_wrap("env", "glLinkProgram", |_: Cx, prog: i32| {
-        let p = with(|s| {
+        let (p, sources) = with(|s| {
             if let Some(info) = s.programs.get_mut(&(prog as u32)) {
                 let counter = info.id_counter.max(1);
                 *info = ProgramInfo { id_counter: counter, ..Default::default() };
             }
-            s.n(Kind::Program, prog as u32)
+            (s.n(Kind::Program, prog as u32), s.attached.get(&(prog as u32)).cloned().unwrap_or_default())
         });
         unsafe { gl::LinkProgram(p) };
+        let stage = |ty: u32| sources.iter().find(|(t, _)| *t == ty).map(|(_, src)| src.as_str());
+        if let (Some(vs), Some(fs)) = (stage(gl::VERTEX_SHADER), stage(gl::FRAGMENT_SHADER)) {
+            crate::shadercache::record(vs, fs);
+        }
     })?;
     l.func_wrap("env", "glGetProgramiv", |_: Cx, prog: i32, pname: i32, out: i32| {
         if out == 0 {

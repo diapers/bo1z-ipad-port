@@ -174,6 +174,7 @@ pub struct Exports {
     pub kb_input: TypedFunc<(i32, i32, i32), i32>,
     pub kb_ui_state: TypedFunc<(), i32>,
     pub kb_audio_ring: TypedFunc<(), i32>,
+    pub kb_set_program_manifest: Option<TypedFunc<(i32, i32), ()>>,
 }
 
 impl Exports {
@@ -211,6 +212,7 @@ impl Exports {
             kb_input: f!("KB_Input"),
             kb_ui_state: f!("KB_UIState"),
             kb_audio_ring: f!("KB_AudioRing"),
+            kb_set_program_manifest: i.get_typed_func(&mut *store, "KB_SetProgramManifest").ok(),
         })
     }
 }
@@ -406,6 +408,17 @@ pub fn boot_main() -> Result<MainThread> {
     // engine.js: KB_AudioRing before callMain; the ring lives in static data.
     let ring = ex.kb_audio_ring.call(&mut store, ())? as u32;
     crate::audio::configure(ring);
+
+    // engine.js: the map's program manifest (<map>-programs.json) before callMain, so the
+    // engine links those programs while the map loads instead of on first sight.
+    if let (Some(set), Some(bytes)) = (ex.kb_set_program_manifest.clone(), crate::shadercache::manifest()) {
+        let p = ex.malloc.call(&mut store, bytes.len() as i32)?;
+        if p != 0 {
+            mem::write(p as u32, &bytes);
+            settle(set.call(&mut store, (p, bytes.len() as i32)), "KB_SetProgramManifest");
+            ex.free.call(&mut store, p)?;
+        }
+    }
 
     // callMain(args): argv on the main thread's stack, then _emscripten_proxy_main,
     // which creates the main pthread (canvas transferred to it) and returns.
@@ -646,6 +659,7 @@ fn event_loop(store: &mut Store<Ctx>) {
         }
         // OffscreenCanvas commit: the frame presents when the worker yields.
         if store.data().gl_current {
+            let work_end = Instant::now();
             if let Some(dir) = rt().paths.opfs_root.parent() {
                 gl_ctx::before_present(dir);
             }
@@ -653,6 +667,7 @@ fn event_loop(store: &mut Store<Ctx>) {
                 crate::glstats::frame_errors();
             }
             gl_ctx::swap();
+            stats.split(work_end - tick_start, work_end.elapsed());
         } else if ml.mode == 1 {
             std::thread::sleep(Duration::from_millis(16));
         }
@@ -693,16 +708,27 @@ pub fn thread_cleanup(cx: &mut Caller<'_, Ctx>, thread: u32) -> Result<()> {
     Ok(())
 }
 
-/// Logs frame pacing every 5 s: fps, average and worst frame-to-frame time, and how many
-/// frames took longer than 1.5x the average (the hitches that read as choppiness).
+/// Logs frame pacing every 5 s: fps, average and worst frame-to-frame time, how many frames
+/// took longer than 1.5x the average (the hitches that read as choppiness), the average time
+/// in the engine's frame ("game") and in presenting it ("present": waits on the GPU), and
+/// the file data read meanwhile.
 #[derive(Default)]
 struct FrameStats {
     last: Option<Instant>,
     window_start: Option<Instant>,
     times: Vec<f32>,
+    work_ms: f32,
+    present_ms: f32,
+    split_n: u32,
 }
 
 impl FrameStats {
+    fn split(&mut self, work: Duration, present: Duration) {
+        self.work_ms += work.as_secs_f32() * 1000.0;
+        self.present_ms += present.as_secs_f32() * 1000.0;
+        self.split_n += 1;
+    }
+
     fn frame(&mut self, now: Instant) {
         if let Some(last) = self.last {
             self.times.push((now - last).as_secs_f32() * 1000.0);
@@ -715,7 +741,15 @@ impl FrameStats {
             let avg = self.times.iter().sum::<f32>() / n;
             let max = self.times.iter().cloned().fold(0.0, f32::max);
             let hitches = self.times.iter().filter(|&&t| t > avg * 1.5).count();
-            log::info(&format!("frames: {:.1} fps, avg {avg:.1} ms, max {max:.1} ms, {hitches} hitches", n / span));
+            let k = self.split_n.max(1) as f32;
+            log::info(&format!(
+                "frames: {:.1} fps, avg {avg:.1} ms, max {max:.1} ms, {hitches} hitches; game {:.1} ms, present {:.1} ms; read {:.1} MB",
+                n / span,
+                self.work_ms / k,
+                self.present_ms / k,
+                crate::loading::take_read_bytes() as f64 / 1e6
+            ));
+            (self.work_ms, self.present_ms, self.split_n) = (0.0, 0.0, 0);
             self.times.clear();
             self.window_start = Some(now);
         }

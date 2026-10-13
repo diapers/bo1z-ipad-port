@@ -31,7 +31,16 @@ pub fn video() -> Option<PathBuf> {
 }
 
 /// File bytes the engine read (fs.rs). Kept for the call sites; no progress bar any more.
-pub fn add_read(_n: usize) {}
+static READ_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// File data the engine read (for the frame stats log line).
+pub fn add_read(n: usize) {
+    READ_BYTES.fetch_add(n as u64, Ordering::Relaxed);
+}
+
+pub fn take_read_bytes() -> u64 {
+    READ_BYTES.swap(0, Ordering::Relaxed)
+}
 
 /// Engine log lines (log.rs) mark the end of loading.
 pub fn engine_line(msg: &str) {

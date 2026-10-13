@@ -199,3 +199,32 @@ Build 4 runs on the iPad (Five playable). Issues from the screen recording + use
 - Debug: BO1Z_NOINPUT=1 (ignore real mouse/keyboard, never grab), FAKEPAD "<t>:shot",
   BO1Z_ARGS="+set ...", BO1Z_GLSTATS=1, BO1Z_SHADERDUMP=<dir>.
 - Build 6f81fa3 (CI run 38300609900) -> D:\bo1z\BO1Z-all.ipa (6.73 GB). PC check: Moon + Five render clean, Five 60 fps capped (debug host). Awaiting device test + bo1z.log frames lines.
+
+## 2026-10-12: shader warm-up during loading
+- iPad: rendering fixed (invariant + no prepass confirmed by user). Remaining: pop-in and
+  stutter early in a map, improving the longer you play.
+- Cause: the engine builds programs on demand (KHR_parallel_shader_compile; draws whose
+  program is not ready are skipped: WEB_GL_DRAWS pending=N) and only prebuilds the bundle's
+  117 "opening_pairs" of 5075 (web/shaders/shaders.pack metadata). r_shaderWarming and
+  r_webWorldWarm do nothing in this build. Pack sources are not exactly what is compiled: the
+  engine rewrites D3DCOLOR vertex inputs (vs_vN -> vs_vN_bgra.bgra) per vertex format.
+- shadercache.rs: records every (vs, fs) source pair the engine links, per map
+  (<data>/shadercache/<slug>.json), merged with a shipped list (<game>/shadercache/<slug>.json,
+  recorded on PC with a scripted tour: FAKEPAD "+t" steps count from game start, "quit").
+  On map pick a worker thread with a shared EGL context (same attributes; surfaceless or
+  1x1 pbuffer) compiles and links them during the loading video; links only once both
+  shaders report COMPLETION_STATUS so ANGLE's lock is not held waiting.
+- blobcache.rs: EGL_ANDROID_blob_cache on disk (iOS Library/Caches/angle, PC data/angle-cache).
+- PC Five, same walk: pending draws after spawn 377 -> 6; first 5 s 21 fps / 1.7 s max ->
+  55 fps / 42 ms max.
+- frames log line now adds "game X ms, present Y ms; read Z MB" (engine work vs present/GPU
+  wait, file data read) for diagnosing the iPad.
+- The site ships <map>-programs.json (only five exists: 481 programs) and engine.js passes it to
+  KB_SetProgramManifest before callMain; the engine then links those programs during loading.
+  build-program-manifests.mjs builds them for every map from the host's recordings (mapped back
+  to shaders.pack hashes; mask = BGRA-rewritten vertex inputs) + the site's five list ->
+  D:\bo1z\maps\shadercache\<slug>-programs.json; rt.rs passes it like engine.js.
+- Recorded on PC (scripted tour per map): kino 399, five 317(+481 site = 519), riese 517, nacht 326,
+  verruckt 511, shinonuma 369, ascension 547, cotd 364, shangrila 369, moon 444 programs.
+- PC fresh-install test (Five, empty caches, shipped lists): pending draws after spawn 0
+  (was 377). Remaining early hitch: ~60 MB texture streaming in the first 10 s (read MB column).

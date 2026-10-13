@@ -379,12 +379,15 @@ fn write_gpad(pad: &PadState) {
 // Debug: BO1Z_FAKEPAD scripts a virtual controller on desktop, for testing without one.
 // Format: "<seconds>:<input>[=<value>];..." where input is a Btn name (A, Start, Down, ...)
 // or an axis (lx, ly, rx, ry, lt, rt). A button without "=0" is pressed; "=0" releases it.
-// "shot" saves a screenshot of the next frame.
+// "shot" saves a screenshot of the next frame, "quit" saves the shader list and exits.
+// A time written "+<seconds>" counts from the game start (intro released) instead of launch.
 // Example: BO1Z_FAKEPAD="20:Start;20.2:Start=0;22:Down;22.2:Down=0;30:ly=1;32:ly=0"
 
 pub struct FakePad {
-    steps: Vec<(f32, String, f32)>,
+    /// (time, relative to the game start?, input, value), in order.
+    steps: Vec<(f32, bool, String, f32)>,
     state: PadState,
+    started: Option<std::time::Instant>,
 }
 
 impl FakePad {
@@ -394,16 +397,22 @@ impl FakePad {
         for item in spec.split(';').map(str::trim).filter(|s| !s.is_empty()) {
             let (t, rest) = item.split_once(':')?;
             let (name, v) = rest.split_once('=').map_or((rest, 1.0), |(n, v)| (n, v.parse().unwrap_or(0.0)));
-            steps.push((t.parse::<f32>().ok()?, name.to_string(), v));
+            let (rel, t) = t.strip_prefix('+').map_or((false, t), |t| (true, t));
+            steps.push((t.parse::<f32>().ok()?, rel, name.to_string(), v));
         }
-        steps.sort_by(|a, b| a.0.total_cmp(&b.0));
+        steps.sort_by(|a, b| (a.1, a.0).partial_cmp(&(b.1, b.0)).unwrap_or(std::cmp::Ordering::Equal));
         crate::log::info(&format!("fake pad: {} steps", steps.len()));
-        Some(Self { steps, state: PadState { connected: true, ..Default::default() } })
+        Some(Self { steps, state: PadState { connected: true, ..Default::default() }, started: None })
     }
 
+    /// `t`: seconds since launch. Steps written "+<t>" count from the game start instead.
     pub fn poll(&mut self, t: f32) -> PadState {
-        while self.steps.first().is_some_and(|s| s.0 <= t) {
-            let (_, name, v) = self.steps.remove(0);
+        if self.started.is_none() && crate::loading::is_released() {
+            self.started = Some(std::time::Instant::now());
+        }
+        let game_t = self.started.map(|s| s.elapsed().as_secs_f32());
+        while let Some(i) = self.steps.iter().position(|s| if s.1 { game_t.is_some_and(|g| s.0 <= g) } else { s.0 <= t }) {
+            let (_, _, name, v) = self.steps.remove(i);
             crate::log::info(&format!("fake pad @{t:.1}s: {name}={v}"));
             let s = &mut self.state;
             match name.as_str() {
@@ -414,6 +423,10 @@ impl FakePad {
                 "lt" => s.lt = v,
                 "rt" => s.rt = v,
                 "shot" => crate::gl_ctx::request_shot(),
+                "quit" => {
+                    crate::shadercache::save_now();
+                    crate::platform::quit(0);
+                }
                 b => {
                     if let Some(btn) = Btn::ALL.iter().find(|x| format!("{x:?}").eq_ignore_ascii_case(b)) {
                         if v != 0.0 {

@@ -108,6 +108,15 @@ try {
     for (const n of art) copyFileSync(join(menuSrc, n), join(game, 'menu', n));
     console.log(`menu art: ${art.length} images`);
   } else console.log('menu art: none (plain selector)');
+  // Shader programs each map uses (recorded on PC by the host) and the engine's program
+  // manifests (build-program-manifests.mjs), built while the map loads.
+  const shaderSrc = join(ROOT, 'maps', 'shadercache');
+  if (existsSync(shaderSrc)) {
+    mkdirSync(join(game, 'shadercache'), { recursive: true });
+    const lists = readdirSync(shaderSrc).filter(n => indexes[/^(.+?)(?:-programs)?\.json$/.exec(n)?.[1]]);
+    for (const n of lists) copyFileSync(join(shaderSrc, n), join(game, 'shadercache', n));
+    console.log(`shader lists: ${lists.join(' ') || 'none'}`);
+  }
   for (const [slug, idx] of Object.entries(indexes)) writeFileSync(join(game, 'maps', `${slug}.json`), JSON.stringify(idx));
   for (const sha of blobs.keys()) {
     const dir = join(game, 'store', sha.slice(0, 2));
