@@ -26,6 +26,10 @@ concurrency:
   group: ios-build-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  actions: read   # gh run download: the pinned engine from an earlier build's artifact
+
 jobs:
   ipa:
     runs-on: macos-15
@@ -85,10 +89,24 @@ jobs:
       - name: ANGLE info
         run: cat "$ANGLE_DIR/ANGLE_INFO.txt"
 
-      # The engine is AOT-compiled here and embedded in the executable, so the app needs no
-      # JIT on the device (see host/src/aot.rs). The wasm is pinned by hash: the host's
-      # EM_ASM table (imports.rs) is specific to this exact build.
-      - name: Fetch engine wasm and translate legacy exceptions
+      # The engine is AOT-compiled and embedded in the executable, so the app needs no JIT on
+      # the device (see host/src/aot.rs). It is pinned by hash: the host's EM_ASM table
+      # (imports.rs) and its memory addresses (input.rs) belong to this exact build. vel.gg
+      # has since replaced it, so the compiled engine is taken, in order, from the Actions
+      # cache, from vel.gg if it still serves the pinned wasm, or from the newest successful
+      # build's IPA (tools/extract-engine.py). Valid while host/Cargo.lock (wasmtime) is
+      # unchanged, which the cache key tracks.
+      - name: Restore compiled engine
+        id: engine-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: build/engine/bo1z-ios.cwasm
+          key: bo1z-engine-61192df3-${{ hashFiles('host/Cargo.lock') }}
+
+      - name: Fetch the pinned engine wasm (vel.gg) and translate legacy exceptions
+        id: fetch
+        if: steps.engine-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
         env:
           WASM_SHA256: 61192df377020627f52fa7e9fd28047bd53662aa46e5e3cd6e7fad0c5c35cc98
         run: |
@@ -104,9 +122,28 @@ jobs:
           ls -la build/engine
 
       - name: AOT-compile the engine for aarch64-apple-ios
+        if: steps.engine-cache.outputs.cache-hit != 'true' && steps.fetch.outcome == 'success'
         run: |
           cargo run --release --manifest-path host/Cargo.toml -- \
             --precompile build/engine/KisakBlack-native.wasm build/engine/bo1z-ios.cwasm --target aarch64-apple-ios
+
+      - name: Take the compiled engine from the newest successful build
+        if: steps.engine-cache.outputs.cache-hit != 'true' && steps.fetch.outcome != 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p build/engine build/prev
+          RUN=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ios-build.yml --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+          echo "engine from run $RUN"
+          gh run download "$RUN" --repo "$GITHUB_REPOSITORY" --name BO1Z-ipa --dir build/prev
+          python3 tools/extract-engine.py "$(find build/prev -name BO1Z.ipa | head -1)" build/engine/bo1z-ios.cwasm
+
+      - name: Save compiled engine
+        if: steps.engine-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build/engine/bo1z-ios.cwasm
+          key: ${{ steps.engine-cache.outputs.cache-primary-key }}
 
       - name: cargo build (aarch64-apple-ios, release, engine embedded)
         env:
@@ -130,4 +167,4 @@ jobs:
             build/ios/BO1Z.ipa
             build/angle-ios/ANGLE_INFO.txt
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 90   # also where the next build can take the compiled engine from
