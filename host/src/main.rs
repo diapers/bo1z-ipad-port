@@ -23,6 +23,7 @@ mod menu;
 mod mem;
 mod platform;
 mod rt;
+mod settings;
 mod shadercache;
 mod video;
 
@@ -89,9 +90,9 @@ fn options() -> Result<Options> {
     Ok(Options { map, game, wasm, egl: egl.unwrap_or(egl_default), data })
 }
 
-/// engine.js fiveArguments + the settings start() splices in, for the WebGL2 route with
-/// all rendering on the main pthread (the Firefox route: r_smp_backend 0).
-fn engine_args(size: (i32, i32), zone: &str, opfs_root: &str) -> Vec<String> {
+/// engine.js fiveArguments + the settings start() splices in, for the WebGL2 route, plus the
+/// player's settings (frame limit, render thread: settings.rs).
+fn engine_args(size: (i32, i32), zone: &str, opfs_root: &str, settings: &[String]) -> Vec<String> {
     let mut a: Vec<String> = [
         "+set", "fs_b", opfs_root,
         "+set", "fs_h", "/opfs/user",
@@ -103,7 +104,6 @@ fn engine_args(size: (i32, i32), zone: &str, opfs_root: &str) -> Vec<String> {
         "+set", "r_aaSamples", "1",
         "+set", "r_clear", "0",
         "+set", "r_vsync", "0",
-        "+set", "com_maxfps", "60",
         "+set", "snd_softwaremixer", "1",
         "+set", "snd_softwarewav", "0",
     ]
@@ -111,7 +111,8 @@ fn engine_args(size: (i32, i32), zone: &str, opfs_root: &str) -> Vec<String> {
     .map(|s| s.to_string())
     .collect();
     a.extend(["+set".into(), "snd_softwaretable".into(), format!("{opfs_root}/web/sound")]);
-    a.extend(["+set", "r_smp_backend", "0", "+set", "sensitivity", "5", "+set", "snd_menu_master", "0.8"].map(String::from));
+    a.extend(["+set", "sensitivity", "5", "+set", "snd_menu_master", "0.8"].map(String::from));
+    a.extend(settings.iter().cloned());
     a.extend(["+set".into(), "r_customMode".into(), format!("{}x{}", size.0, size.1)]);
     // Apple GPUs drop hidden surfaces in hardware: the depth-only prepass is ~650 extra draws
     // a frame of pure CPU cost there, and the passes after it depend on matching its depth.
@@ -202,12 +203,17 @@ pub struct Launcher {
 }
 
 impl Launcher {
+    /// Writable data directory.
+    pub fn data_dir(&self) -> PathBuf {
+        self.data.clone()
+    }
+
     /// Menu and loading-screen art (`<game>/menu`).
     pub fn menu_dir(&self) -> PathBuf {
         self.game.join("menu")
     }
 
-    pub fn boot(&self, m: &maps::MapInfo, size: (i32, i32)) -> Result<rt::Boot> {
+    pub fn boot(&self, m: &maps::MapInfo, size: (i32, i32), settings: &[String]) -> Result<rt::Boot> {
         log::info(&format!("map {} ({}); game {}; wasm {}", m.slug, m.zone, self.game.display(), self.wasm.display()));
         let (mount, ff_bytes) = m.mount(&self.game)?;
         let _ = ff_bytes;
@@ -220,7 +226,7 @@ impl Launcher {
         let paths = rt::Paths { opfs_root: self.data.join("opfs"), mounts: vec![(format!("{opfs_dir}/files"), mount)] };
         // The module is compiled on the browser-main thread after the window is up, so the UI
         // thread finishes launching quickly (iOS kills apps that take too long to launch).
-        Ok(rt::Boot { wasm: self.wasm.clone(), args: engine_args(size, m.zone, &opfs_root), paths })
+        Ok(rt::Boot { wasm: self.wasm.clone(), args: engine_args(size, m.zone, &opfs_root, settings), paths })
     }
 }
 
@@ -236,7 +242,7 @@ fn run() -> Result<()> {
         None => None,
     };
     let last = std::fs::read_to_string(o.data.join("map.txt")).ok().map(|s| s.trim().to_string());
-    let menu = menu::Menu::new(found, last.as_deref(), &o.game.join("menu"));
+    let menu = menu::Menu::new(found, last.as_deref(), &o.game.join("menu"), settings::Settings::load(&o.data));
     blobcache::configure(cache_dir());
     let launcher = Launcher { game: o.game.clone(), wasm: o.wasm.clone(), data: o.data.clone() };
     let mut app = platform::App::new(o.egl.clone(), launcher, menu, direct);

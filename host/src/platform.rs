@@ -94,6 +94,99 @@ pub struct App {
     autoplay: Option<f32>,
     #[cfg(target_os = "ios")]
     video_overlay: Option<crate::loading::VideoOverlay>,
+    /// Frame counter (settings): shown while a map runs, updated twice a second.
+    fps: Option<FpsCounter>,
+    map_name: String,
+    gate: StartGate,
+}
+
+/// Waits, after the map has loaded, until the game would start smoothly (loading.rs).
+#[derive(Default)]
+struct StartGate {
+    /// The cinematic played to its end (it then holds its last frame).
+    video_finished: bool,
+    loaded_at: Option<Instant>,
+    read_mark: Option<(Instant, u64)>,
+    /// File bytes read in the last second.
+    read_rate: u64,
+    status: String,
+    open: bool,
+    /// The game was started automatically, behind the loading screen, at this time.
+    released_hidden: Option<Instant>,
+}
+
+impl StartGate {
+    const TIMEOUT: Duration = Duration::from_secs(90);
+
+    /// (ready, status line). Ready once background shader builds are done, no engine
+    /// program is compiling, texture streaming is quiet and frames have been hitch-free
+    /// for 1.5 s; or 90 s after loading.
+    fn check(&mut self) -> (bool, String) {
+        if !crate::loading::done() {
+            return (false, String::new());
+        }
+        let now = Instant::now();
+        let total = crate::loading::read_total();
+        let (t0, b0) = *self.read_mark.get_or_insert((now, total));
+        if now - t0 >= Duration::from_secs(1) {
+            self.read_rate = total - b0;
+            self.read_mark = Some((now, total));
+        }
+        if self.open {
+            return (true, String::new());
+        }
+        let loaded = *self.loaded_at.get_or_insert(now);
+        let compiling = crate::gl::programs_compiling();
+        let status = if let Some((built, of)) = crate::shadercache::warm_progress() {
+            format!("PREPARING SHADERS  {built} / {of}")
+        } else if compiling > 0 {
+            format!("COMPILING SHADERS  ({compiling} LEFT)")
+        } else if self.read_rate > 1_000_000 {
+            "LOADING TEXTURES".to_string()
+        } else if rt::smooth_for() < Duration::from_millis(1500) {
+            "ALMOST READY".to_string()
+        } else {
+            String::new()
+        };
+        if status != self.status {
+            log::info(&format!("start gate: {}", if status.is_empty() { "ready" } else { &status }));
+            self.status = status.clone();
+        }
+        let timed_out = now - loaded > Self::TIMEOUT;
+        if status.is_empty() || timed_out {
+            self.open = true;
+            log::info(&format!(
+                "start gate open {:.1} s after loading{}",
+                (now - loaded).as_secs_f32(),
+                if timed_out { " (timed out)" } else { "" }
+            ));
+        }
+        (self.open, status)
+    }
+
+    /// After a hidden start: the engine's one-time start-up work (spawn, round start,
+    /// first textures) has passed, frames are smooth: show the game. At most 15 s.
+    fn reveal(&mut self) -> bool {
+        let Some(at) = self.released_hidden else { return true };
+        let since = at.elapsed();
+        let calm = since > Duration::from_millis(1500)
+            && rt::smooth_for() > Duration::from_millis(1500)
+            && self.read_rate < 2_000_000;
+        if calm || since > Duration::from_secs(15) {
+            log::info(&format!("revealing the game {:.1} s after start{}", since.as_secs_f32(), if calm { "" } else { " (timed out)" }));
+            self.released_hidden = None;
+            return true;
+        }
+        false
+    }
+}
+
+/// The frame counter: a label over the game on iOS, the window title on desktop.
+struct FpsCounter {
+    last: Instant,
+    frames: u64,
+    #[cfg(target_os = "ios")]
+    label: objc2::rc::Retained<objc2_ui_kit::UILabel>,
 }
 
 impl App {
@@ -122,6 +215,9 @@ impl App {
             autoplay: std::env::var("BO1Z_AUTOPLAY").ok().and_then(|s| s.parse().ok()),
             #[cfg(target_os = "ios")]
             video_overlay: None,
+            fps: None,
+            map_name: String::new(),
+            gate: StartGate::default(),
         }
     }
 
@@ -141,6 +237,8 @@ impl App {
         self.window = Some(window);
         self.pads = Some(Pads::new());
         log::info(&format!("window + EGL ready, surface {:?}", gl_ctx::surface_size()));
+        let (sw, sh) = self.screen_points();
+        crate::settings::set_screen(sw as u32, sh as u32);
         if let Some(m) = self.direct.take() {
             return self.launch(m);
         }
@@ -155,8 +253,35 @@ impl App {
     /// Boot the engine with the chosen map, with its loading cinematic playing on top.
     /// Order matters: the map is set up first, then the video starts, then the engine.
     fn launch(&mut self, m: MapInfo) -> anyhow::Result<()> {
+        let settings = self.menu.as_ref().map(|menu| {
+            menu.settings.log();
+            (
+                menu.settings.engine_args(),
+                menu.settings.value(crate::settings::RESOLUTION),
+                menu.settings.on(crate::settings::FRAME_COUNTER),
+            )
+        });
+        let (settings_args, scale, show_fps) = settings.unwrap_or((vec![], 1.0, false));
+        #[cfg(target_os = "ios")]
+        if let Some(w) = self.window.as_ref() {
+            set_render_scale(w, scale);
+        }
+        #[cfg(not(target_os = "ios"))]
+        let _ = scale;
+        // Present once on this thread: clears the menu (desktop) and makes ANGLE size its
+        // drawable for the render scale before the engine reads it.
+        if gl_ctx::make_current().is_ok() {
+            unsafe {
+                gl::ClearColor(0.0, 0.0, 0.0, 1.0);
+                gl::Clear(gl::COLOR_BUFFER_BIT);
+            }
+            gl_ctx::swap();
+        }
+        gl_ctx::release_current();
+        log::info(&format!("render size {:?}", gl_ctx::surface_size()));
         // Render at the drawing-buffer size (engine.js passes the canvas size the same way).
-        let boot = self.launcher.boot(&m, gl_ctx::surface_size())?;
+        let boot = self.launcher.boot(&m, gl_ctx::surface_size(), &settings_args)?;
+        self.map_name = m.name.to_string();
         let video = self.launcher.menu_dir().join(format!("load-{}.mp4", m.slug));
         crate::loading::set_video(video.is_file().then_some(video));
         #[cfg(target_os = "ios")]
@@ -171,15 +296,6 @@ impl App {
         }
         #[cfg(not(target_os = "ios"))]
         {
-            // The menu drew on the UI thread; the engine thread takes the context now.
-            if gl_ctx::make_current().is_ok() {
-                unsafe {
-                    gl::ClearColor(0.0, 0.0, 0.0, 1.0);
-                    gl::Clear(gl::COLOR_BUFFER_BIT);
-                }
-                gl_ctx::swap();
-            }
-            gl_ctx::release_current();
             #[cfg(windows)]
             {
                 self.load_video = self.start_video();
@@ -189,9 +305,23 @@ impl App {
             }
         }
         self.menu = None;
+        if show_fps {
+            self.fps = Some(FpsCounter::new(self.window.as_ref()));
+        }
         rt::start_browser_main(boot);
         self.booted = true;
         Ok(())
+    }
+
+    /// The screen in points (iOS) or the window in pixels: what render scale 100% means.
+    fn screen_points(&self) -> (f64, f64) {
+        #[cfg(target_os = "ios")]
+        if let Some(v) = self.window.as_ref().and_then(game_view) {
+            let b = v.bounds();
+            return (b.size.width, b.size.height);
+        }
+        let (w, h) = gl_ctx::surface_size();
+        (w as f64, h as f64)
     }
 
     /// Desktop: the cinematic in a borderless child window covering the game window.
@@ -250,6 +380,7 @@ impl App {
             let (w, h) = gl_ctx::surface_size();
             if gl_ctx::make_current().is_ok() {
                 crate::menu::draw_gl(menu, w, h);
+                gl_ctx::before_present(&self.launcher.data_dir());
                 gl_ctx::swap();
             }
             if let Some(win) = self.window.as_ref() {
@@ -289,8 +420,14 @@ impl App {
         self.booted && crate::loading::done() && !crate::loading::is_released()
     }
 
+    /// The player asked to start: the game shows at once.
     fn start_game(&mut self) {
         self.end_video();
+        self.release();
+    }
+
+    /// Open the intro gate: the engine leaves its held first frame.
+    fn release(&mut self) {
         rt::post_input(input::INTRO, 1, 0);
         #[cfg(not(target_os = "ios"))]
         if !self.grabbed {
@@ -335,7 +472,11 @@ impl App {
     }
 
     fn tick(&mut self) {
-        // The loading cinematic: removed when it ends or once the game has started.
+        if let Some(f) = self.fps.as_mut() {
+            f.update(self.window.as_ref(), &self.map_name);
+        }
+        // The loading cinematic: plays to its end, then holds its last frame until the game
+        // is ready to start smoothly (StartGate) or the player presses to start.
         #[cfg(windows)]
         let ended = match self.load_video.as_mut() {
             Some((child, v)) => {
@@ -344,25 +485,44 @@ impl App {
                         let _ = child.request_inner_size(p);
                     }
                 }
-                v.tick() || crate::loading::is_released()
+                v.tick()
             }
             None => false,
         };
         #[cfg(target_os = "ios")]
         let ended = match self.video_overlay.as_mut() {
-            Some(o) => o.tick() || crate::loading::is_released(),
+            Some(o) => o.tick(),
             None => false,
         };
         #[cfg(not(any(windows, target_os = "ios")))]
         let ended = false;
-        if ended {
+        if ended && !self.gate.video_finished {
             log::info("loading video finished");
-            self.end_video();
+            self.gate.video_finished = true;
         }
-        // Like the site: once the map has loaded and the video is gone, the game starts.
-        if self.waiting_to_start() && !self.video_running() {
-            self.start_game();
+        let (ready, mut status) = if self.booted { self.gate.check() } else { (false, String::new()) };
+        // Like the site, the game starts once the map has loaded and the video is over; but
+        // it starts behind the video's last frame and is shown only when its start-up hitch
+        // has passed, so it appears running smoothly.
+        let video_over = self.gate.video_finished || !self.video_running();
+        if self.waiting_to_start() && ready && video_over {
+            self.gate.released_hidden = Some(Instant::now());
+            self.release();
         }
+        if crate::loading::is_released() && self.video_running() {
+            if self.gate.released_hidden.is_none() || self.gate.reveal() {
+                // A press started the game (skip), or it is ready to be seen.
+                self.end_video();
+            } else {
+                status = "STARTING".to_string();
+            }
+        }
+        #[cfg(target_os = "ios")]
+        if let Some(o) = self.video_overlay.as_ref() {
+            o.set_status(if self.gate.video_finished { &status } else { "" });
+        }
+        #[cfg(not(target_os = "ios"))]
+        let _ = &status;
         if BACK_TO_MENU.load(std::sync::atomic::Ordering::Relaxed) {
             restart_to_menu();
         }
@@ -376,6 +536,11 @@ impl App {
                 let chosen = self.menu.as_mut().and_then(|m| m.pad(&pad));
                 if let Some(i) = chosen {
                     return self.choose(i);
+                }
+            }
+            if gl_ctx::shot_requested() {
+                if let Some(m) = self.menu.as_mut() {
+                    m.dirty = true;
                 }
             }
             // Debug: BO1Z_AUTOPICK=<slug> chooses without input.
@@ -634,6 +799,68 @@ fn game_view(w: &Window) -> Option<objc2::rc::Retained<objc2_ui_kit::UIView>> {
     let RawWindowHandle::UiKit(h) = w.window_handle().ok()?.as_raw() else { return None };
     let view: &objc2_ui_kit::UIView = unsafe { h.ui_view.cast::<objc2_ui_kit::UIView>().as_ref() };
     Some(view.retain())
+}
+
+impl FpsCounter {
+    fn new(_window: Option<&Window>) -> Self {
+        #[cfg(target_os = "ios")]
+        let label = {
+            use objc2::MainThreadOnly;
+            use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+            use objc2_ui_kit::{UIColor, UIFont, UILabel};
+            let mtm = objc2::MainThreadMarker::new().expect("UI thread");
+            let l = UILabel::initWithFrame(UILabel::alloc(mtm), CGRect::new(CGPoint::new(12.0, 12.0), CGSize::new(150.0, 30.0)));
+            unsafe {
+                l.setTextColor(Some(&UIColor::colorWithRed_green_blue_alpha(0.4, 1.0, 0.4, 1.0)));
+                l.setFont(Some(&UIFont::monospacedDigitSystemFontOfSize_weight(18.0, 0.4)));
+            }
+            l.setBackgroundColor(Some(&UIColor::colorWithRed_green_blue_alpha(0.0, 0.0, 0.0, 0.55)));
+            l.setTextAlignment(objc2_ui_kit::NSTextAlignment(1));
+            if let Some(v) = _window.and_then(game_view) {
+                v.addSubview(&l);
+            }
+            l
+        };
+        Self {
+            last: Instant::now(),
+            frames: rt::presented_frames(),
+            #[cfg(target_os = "ios")]
+            label,
+        }
+    }
+
+    fn update(&mut self, _window: Option<&Window>, _map: &str) {
+        let dt = self.last.elapsed().as_secs_f64();
+        if dt < 0.5 {
+            return;
+        }
+        let n = rt::presented_frames();
+        let fps = (n - self.frames) as f64 / dt;
+        self.frames = n;
+        self.last = Instant::now();
+        let text = format!("{fps:.0} FPS");
+        #[cfg(target_os = "ios")]
+        {
+            self.label.setText(Some(&objc2_foundation::NSString::from_str(&text)));
+            if let Some(v) = self.label.superview() {
+                v.bringSubviewToFront(&self.label);
+            }
+        }
+        #[cfg(not(target_os = "ios"))]
+        if let Some(w) = _window {
+            w.set_title(&format!("BO1Z - {_map} - {text}"));
+        }
+    }
+}
+
+/// Render resolution = the view's point size x `scale` (1.0: half the Retina pixels per side).
+#[cfg(target_os = "ios")]
+fn set_render_scale(w: &Window, scale: f32) {
+    if let Some(v) = game_view(w) {
+        let s = scale.clamp(0.5, 3.0) as f64;
+        v.setContentScaleFactor(s);
+        v.layer().setContentsScale(s);
+    }
 }
 
 /// ANGLE's Metal backend accepts any CALayer: it adds a CAMetalLayer sublayer and keeps

@@ -9,11 +9,15 @@
 //!
 //! Front ends: UIKit image views on iOS; GL framebuffer blits on desktop (no shaders).
 //! Input: pad (d-pad / left stick + A or Start), keyboard (arrows + Enter), tap/click.
+//!
+//! Below the maps, a SETTINGS row opens the settings (settings.rs) in the panel area:
+//! up/down picks an option, left/right or A changes it, B (Escape) goes back; a tap cycles one.
 
 use std::path::{Path, PathBuf};
 
 use crate::input::{Btn, PadState};
 use crate::maps::MapInfo;
+use crate::settings::{Settings, OPTIONS};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Rect {
@@ -38,7 +42,13 @@ const PANEL: Rect = Rect { x: 850.0, y: 240.0, w: 750.0, h: 720.0 };
 
 pub struct Menu {
     pub maps: Vec<MapInfo>,
+    /// A map index, or `maps.len()` for the SETTINGS row.
     pub sel: usize,
+    pub settings: Settings,
+    /// The settings panel is open (input goes to it).
+    pub in_settings: bool,
+    /// Selected option in the settings panel.
+    pub opt: usize,
     /// Directory holding mapselect-*.webp, when every needed image is present.
     pub art: Option<PathBuf>,
     prev: std::collections::HashSet<Btn>,
@@ -49,7 +59,7 @@ pub struct Menu {
 const COLS: usize = 2;
 
 impl Menu {
-    pub fn new(maps: Vec<MapInfo>, last: Option<&str>, art_dir: &Path) -> Self {
+    pub fn new(maps: Vec<MapInfo>, last: Option<&str>, art_dir: &Path, settings: Settings) -> Self {
         let sel = last.and_then(|l| maps.iter().position(|m| m.slug == l)).unwrap_or(0);
         let have = |n: &str| art_dir.join(n).is_file();
         let art_ok = have("mapselect-supported.webp")
@@ -62,6 +72,9 @@ impl Menu {
         Self {
             maps,
             sel,
+            settings,
+            in_settings: false,
+            opt: 0,
             art: art_ok.then(|| art_dir.to_path_buf()),
             prev: Default::default(),
             stick_ready: true,
@@ -101,6 +114,44 @@ impl Menu {
         Self::on_stage(Self::stage(w, h), PANEL)
     }
 
+    /// The SETTINGS row, under the maps.
+    pub fn settings_row_rect(&self, w: f32, h: f32) -> Rect {
+        if self.art.is_some() {
+            Self::on_stage(Self::stage(w, h), Rect { y: ROW.y + (self.maps.len() as f32 + 0.5) * ROW_PITCH, ..ROW })
+        } else {
+            let last = self.item_rect(self.maps.len().saturating_sub(1), w, h);
+            Rect { x: 0.05 * w, y: (last.y + last.h + 0.01 * h).min(0.95 * h), w: 0.9 * w, h: 0.04 * h }
+        }
+    }
+
+    /// The settings panel: where the map preview is (art) or over the tiles (plain).
+    pub fn settings_panel_rect(&self, w: f32, h: f32) -> Rect {
+        if self.art.is_some() {
+            self.panel_rect(w, h)
+        } else {
+            Rect { x: 0.15 * w, y: 0.17 * h, w: 0.7 * w, h: 0.7 * h }
+        }
+    }
+
+    /// Settings panel parts: title band, option `i`'s row, and the hint line.
+    pub fn settings_title_rect(&self, w: f32, h: f32) -> Rect {
+        let p = self.settings_panel_rect(w, h);
+        Rect { x: p.x, y: p.y + p.h * 0.03, w: p.w, h: p.h * 0.1 }
+    }
+
+    pub fn settings_opt_rect(&self, i: usize, w: f32, h: f32) -> Rect {
+        let p = self.settings_panel_rect(w, h);
+        let rh = p.h * 0.09;
+        Rect { x: p.x + p.w * 0.04, y: p.y + p.h * 0.16 + i as f32 * rh * 1.12, w: p.w * 0.92, h: rh }
+    }
+
+    pub fn settings_hint_rect(&self, w: f32, h: f32) -> Rect {
+        let p = self.settings_panel_rect(w, h);
+        Rect { x: p.x, y: p.y + p.h * 0.88, w: p.w, h: p.h * 0.07 }
+    }
+
+    pub const SETTINGS_HINT: &'static str = "LEFT / RIGHT CHANGES   B GOES BACK";
+
     pub fn rows(&self) -> usize {
         self.maps.len().div_ceil(COLS).max(1)
     }
@@ -133,21 +184,50 @@ impl Menu {
     // ---- input -----------------------------------------------------------------------------
 
     fn step(&mut self, dx: i32, dy: i32) {
-        let n = self.maps.len() as i32;
-        if n == 0 {
+        if self.in_settings {
+            if dy != 0 {
+                self.opt = (self.opt as i32 + dy).rem_euclid(OPTIONS.len() as i32) as usize;
+            }
+            if dx != 0 {
+                self.settings.step(self.opt, dx);
+            }
+            self.dirty = true;
             return;
         }
+        // The maps, then the SETTINGS row.
+        let n = self.maps.len() as i32 + 1;
         let cur = self.sel as i32;
         // Art mode is a single column: left/right do nothing, up/down move by one.
-        let next = if self.art.is_some() {
+        let next = if self.art.is_some() || cur == n - 1 {
             cur + dy
         } else if dx != 0 {
             cur + dx
         } else {
-            cur + dy * COLS as i32
+            (cur + dy * COLS as i32).min(n - 1)
         };
         if (0..n).contains(&next) && next != cur {
             self.sel = next as usize;
+            self.dirty = true;
+        }
+    }
+
+    /// A / Enter: play the selected map, open the settings, or change the selected option.
+    fn accept(&mut self) -> Option<usize> {
+        if self.in_settings {
+            self.settings.step(self.opt, 1);
+        } else if self.sel == self.maps.len() {
+            self.in_settings = true;
+        } else {
+            return Some(self.sel);
+        }
+        self.dirty = true;
+        None
+    }
+
+    /// B / Escape: leave the settings.
+    fn back(&mut self) {
+        if self.in_settings {
+            self.in_settings = false;
             self.dirty = true;
         }
     }
@@ -181,14 +261,16 @@ impl Menu {
                 self.step(0, -(y.signum() as i32)); // stick up is +y
             }
         }
-        if pressed(Btn::A) || pressed(Btn::Start) {
-            chosen = Some(self.sel);
+        if pressed(Btn::A) || (pressed(Btn::Start) && !self.in_settings) {
+            chosen = self.accept();
+        } else if pressed(Btn::B) || (pressed(Btn::Start) && self.in_settings) {
+            self.back();
         }
         self.prev = p.buttons.clone();
         chosen
     }
 
-    /// Keyboard: arrows move, Enter/Space chooses.
+    /// Keyboard: arrows move, Enter/Space chooses, Escape leaves the settings.
     pub fn key(&mut self, code: winit::keyboard::KeyCode) -> Option<usize> {
         use winit::keyboard::KeyCode as K;
         match code {
@@ -196,20 +278,55 @@ impl Menu {
             K::ArrowDown | K::KeyS => self.step(0, 1),
             K::ArrowLeft | K::KeyA => self.step(-1, 0),
             K::ArrowRight | K::KeyD => self.step(1, 0),
-            K::Enter | K::NumpadEnter | K::Space => return Some(self.sel),
+            K::Enter | K::NumpadEnter | K::Space => return self.accept(),
+            K::Escape | K::Backspace => self.back(),
             _ => {}
         }
         None
     }
 
-    /// Tap/click at (x, y) on a w x h surface: the map under it.
+    /// Tap/click at (x, y) on a w x h surface: plays the map under it; the SETTINGS row
+    /// opens or closes the settings; an option row cycles that option.
     pub fn tap(&mut self, x: f32, y: f32, w: f32, h: f32) -> Option<usize> {
-        (0..self.maps.len()).find(|&i| self.hit_rect(i, w, h).contains(x, y))
+        if self.settings_row_rect(w, h).contains(x, y) {
+            self.sel = self.maps.len();
+            self.in_settings = !self.in_settings;
+            self.dirty = true;
+            return None;
+        }
+        if self.in_settings {
+            if let Some(i) = (0..OPTIONS.len()).find(|&i| self.settings_opt_rect(i, w, h).contains(x, y)) {
+                self.opt = i;
+                self.settings.step(i, 1);
+                self.dirty = true;
+                return None;
+            }
+            if self.settings_panel_rect(w, h).contains(x, y) {
+                return None;
+            }
+        }
+        let hit = (0..self.maps.len()).find(|&i| self.hit_rect(i, w, h).contains(x, y));
+        if hit.is_some() {
+            self.in_settings = false;
+        }
+        hit
     }
 
     /// Mouse hover selects the row under the cursor (the site keeps the last one selected).
     pub fn hover(&mut self, x: f32, y: f32, w: f32, h: f32) {
-        if let Some(i) = self.tap(x, y, w, h) {
+        if self.in_settings {
+            if let Some(i) = (0..OPTIONS.len()).find(|&i| self.settings_opt_rect(i, w, h).contains(x, y)) {
+                if i != self.opt {
+                    self.opt = i;
+                    self.dirty = true;
+                }
+            }
+            return;
+        }
+        let row = (0..self.maps.len())
+            .find(|&i| self.hit_rect(i, w, h).contains(x, y))
+            .or_else(|| self.settings_row_rect(w, h).contains(x, y).then_some(self.maps.len()));
+        if let Some(i) = row {
             if i != self.sel {
                 self.sel = i;
                 self.dirty = true;
@@ -221,6 +338,7 @@ impl Menu {
 pub const BG: [f32; 3] = [0.04, 0.04, 0.05];
 pub const TILE: [f32; 3] = [0.14, 0.14, 0.16];
 pub const TILE_SEL: [f32; 3] = [0.62, 0.08, 0.06];
+pub const PANEL_BG: [f32; 3] = [0.07, 0.07, 0.08];
 
 // ---------------------------------------------------------------------------------------
 // Desktop rendering: every image is opaque, so each one is a framebuffer blit from a
@@ -342,6 +460,7 @@ fn draw_gl_with(menu: &Menu, art: &mut GlArt, w: i32, h: i32) {
             art.blit(&p, menu.panel_rect(fw, fh), h);
         }
         unsafe { gl::BindFramebuffer(gl::FRAMEBUFFER, 0) };
+        draw_gl_settings(menu, w, h);
         return;
     }
     let rect = |x: i32, y_top: i32, rw: i32, rh: i32, c: [f32; 3]| unsafe {
@@ -366,14 +485,60 @@ fn draw_gl_with(menu: &Menu, art: &mut GlArt, w: i32, h: i32) {
         text(&rect, &m.name.to_ascii_uppercase(), r, px, [0.95, 0.95, 0.95]);
     }
     unsafe { gl::Disable(gl::SCISSOR_TEST) };
+    draw_gl_settings(menu, w, h);
+}
+
+/// The SETTINGS row and, when open, the settings panel (scissor clears + 5x7 font).
+#[cfg(not(target_os = "ios"))]
+fn draw_gl_settings(menu: &Menu, w: i32, h: i32) {
+    let rect = |x: i32, y_top: i32, rw: i32, rh: i32, c: [f32; 3]| unsafe {
+        gl::Scissor(x, h - y_top - rh, rw.max(0), rh.max(0));
+        gl::ClearColor(c[0], c[1], c[2], 1.0);
+        gl::Clear(gl::COLOR_BUFFER_BIT);
+    };
+    let fill = |r: Rect, c: [f32; 3]| rect(r.x as i32, r.y as i32, r.w as i32, r.h as i32, c);
+    let (fw, fh) = (w as f32, h as f32);
+    let fit = |r: Rect, chars: usize| ((r.h * 0.6) as i32 / 7).min((r.w * 0.9) as i32 / (chars.max(1) as i32 * 6)).max(1);
+    unsafe { gl::Enable(gl::SCISSOR_TEST) };
+    let row = menu.settings_row_rect(fw, fh);
+    let selected = menu.sel == menu.maps.len();
+    fill(row, if selected || menu.in_settings { TILE_SEL } else { TILE });
+    text(&rect, "SETTINGS", row, fit(row, 12), [0.95, 0.95, 0.95]);
+    if menu.in_settings {
+        fill(menu.settings_panel_rect(fw, fh), PANEL_BG);
+        let t = menu.settings_title_rect(fw, fh);
+        text(&rect, "SETTINGS", t, fit(t, 12), [0.95, 0.95, 0.95]);
+        for (i, o) in OPTIONS.iter().enumerate() {
+            let r = menu.settings_opt_rect(i, fw, fh);
+            fill(r, if i == menu.opt { TILE_SEL } else { TILE });
+            let px = fit(r, 32);
+            let pad = Rect { x: r.x + r.w * 0.03, w: r.w * 0.94, ..r };
+            text_aligned(&rect, o.label, pad, px, [0.95, 0.95, 0.95], -1);
+            text_aligned(&rect, &menu.settings.text(i), pad, px, [1.0, 0.75, 0.3], 1);
+        }
+        let hint = menu.settings_hint_rect(fw, fh);
+        text(&rect, Menu::SETTINGS_HINT, hint, fit(hint, 40), [0.6, 0.6, 0.6]);
+    }
+    unsafe { gl::Disable(gl::SCISSOR_TEST) };
 }
 
 /// Centre `s` in the box with `px`-sized font pixels.
 #[cfg(not(target_os = "ios"))]
 pub fn text(rect: &impl Fn(i32, i32, i32, i32, [f32; 3]), s: &str, b: Rect, px: i32, c: [f32; 3]) {
+    text_aligned(rect, s, b, px, c, 0)
+}
+
+/// `s` in the box, vertically centred; `align` -1 left, 0 centre, 1 right.
+#[cfg(not(target_os = "ios"))]
+pub fn text_aligned(rect: &impl Fn(i32, i32, i32, i32, [f32; 3]), s: &str, b: Rect, px: i32, c: [f32; 3], align: i32) {
     let n = s.chars().count().max(1) as i32;
     let tw = n * 6 * px - px;
-    let (ox, oy) = (b.x as i32 + (b.w as i32 - tw) / 2, b.y as i32 + (b.h as i32 - 7 * px) / 2);
+    let ox = match align {
+        a if a < 0 => b.x as i32,
+        0 => b.x as i32 + (b.w as i32 - tw) / 2,
+        _ => (b.x + b.w) as i32 - tw,
+    };
+    let oy = b.y as i32 + (b.h as i32 - 7 * px) / 2;
     for (k, ch) in s.chars().enumerate() {
         for (row, bits) in glyph(ch).iter().enumerate() {
             for col in 0..5 {
@@ -415,6 +580,20 @@ fn glyph(c: char) -> [u8; 7] {
         'X' => [0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11],
         'Y' => [0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04],
         'Z' => [0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F],
+        '0' => [0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E],
+        '1' => [0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E],
+        '2' => [0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F],
+        '3' => [0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E],
+        '4' => [0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02],
+        '5' => [0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E],
+        '6' => [0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E],
+        '7' => [0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08],
+        '8' => [0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E],
+        '9' => [0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C],
+        '%' => [0x18, 0x19, 0x02, 0x04, 0x08, 0x13, 0x03],
+        '(' => [0x02, 0x04, 0x08, 0x08, 0x08, 0x04, 0x02],
+        ')' => [0x08, 0x04, 0x02, 0x02, 0x02, 0x04, 0x08],
+        '/' => [0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x00],
         '-' => [0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00],
         '.' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C],
         '\'' => [0x04, 0x04, 0x08, 0x00, 0x00, 0x00, 0x00],
@@ -438,6 +617,35 @@ pub struct Overlay {
     /// Plain mode.
     tiles: Vec<objc2::rc::Retained<objc2_ui_kit::UILabel>>,
     title: Option<objc2::rc::Retained<objc2_ui_kit::UILabel>>,
+    /// The SETTINGS row and the settings panel: (row background, name, value) per option.
+    settings_row: objc2::rc::Retained<objc2_ui_kit::UILabel>,
+    settings_panel: objc2::rc::Retained<objc2_ui_kit::UIView>,
+    settings_title: objc2::rc::Retained<objc2_ui_kit::UILabel>,
+    settings_opts: Vec<(objc2::rc::Retained<objc2_ui_kit::UIView>, objc2::rc::Retained<objc2_ui_kit::UILabel>, objc2::rc::Retained<objc2_ui_kit::UILabel>)>,
+    settings_hint: objc2::rc::Retained<objc2_ui_kit::UILabel>,
+}
+
+#[cfg(target_os = "ios")]
+fn ui_color(c: [f32; 3]) -> objc2::rc::Retained<objc2_ui_kit::UIColor> {
+    objc2_ui_kit::UIColor::colorWithRed_green_blue_alpha(c[0] as f64, c[1] as f64, c[2] as f64, 1.0)
+}
+
+/// A label with the menu's bold white text; `align` 0 left, 1 centre, 2 right.
+#[cfg(target_os = "ios")]
+fn ui_label(mtm: objc2::MainThreadMarker, s: &str, size: f64, align: isize) -> objc2::rc::Retained<objc2_ui_kit::UILabel> {
+    use objc2::MainThreadOnly;
+    use objc2_core_foundation::CGRect;
+    use objc2_foundation::NSString;
+    use objc2_ui_kit::{NSTextAlignment, UIColor, UIFont, UILabel};
+    let l = UILabel::initWithFrame(UILabel::alloc(mtm), CGRect::default());
+    l.setText(Some(&NSString::from_str(s)));
+    unsafe {
+        l.setTextColor(Some(&UIColor::whiteColor()));
+        l.setFont(Some(&UIFont::boldSystemFontOfSize(size)));
+    }
+    l.setTextAlignment(NSTextAlignment(align));
+    l.setAdjustsFontSizeToFitWidth(true);
+    l
 }
 
 #[cfg(target_os = "ios")]
@@ -491,7 +699,44 @@ impl Overlay {
             title = Some(label("Choose a map", 34.0));
             tiles = menu.maps.iter().map(|m| label(m.name, 26.0)).collect();
         }
-        let o = Self { root, parent: parent.retain(), rows, panel, panels, background, tiles, title };
+        let settings_row = ui_label(mtm, "SETTINGS", 20.0, 1);
+        root.addSubview(&settings_row);
+        let settings_panel = UIView::initWithFrame(UIView::alloc(mtm), CGRect::default());
+        settings_panel.setBackgroundColor(Some(&ui_color(PANEL_BG)));
+        root.addSubview(&settings_panel);
+        let settings_title = ui_label(mtm, "SETTINGS", 30.0, 1);
+        root.addSubview(&settings_title);
+        let settings_opts = OPTIONS
+            .iter()
+            .map(|o| {
+                let bg = UIView::initWithFrame(UIView::alloc(mtm), CGRect::default());
+                root.addSubview(&bg);
+                let name = ui_label(mtm, o.label, 20.0, 0);
+                let value = ui_label(mtm, "", 20.0, 2);
+                unsafe { value.setTextColor(Some(&ui_color([1.0, 0.75, 0.3]))) };
+                root.addSubview(&name);
+                root.addSubview(&value);
+                (bg, name, value)
+            })
+            .collect();
+        let settings_hint = ui_label(mtm, "TAP AN OPTION TO CHANGE IT  -  CONTROLLER: LEFT / RIGHT, B TO GO BACK", 14.0, 1);
+        unsafe { settings_hint.setTextColor(Some(&ui_color([0.6, 0.6, 0.6]))) };
+        root.addSubview(&settings_hint);
+        let o = Self {
+            root,
+            parent: parent.retain(),
+            rows,
+            panel,
+            panels,
+            background,
+            tiles,
+            title,
+            settings_row,
+            settings_panel,
+            settings_title,
+            settings_opts,
+            settings_hint,
+        };
         parent.addSubview(&o.root);
         o.layout(menu);
         Some(o)
@@ -518,6 +763,17 @@ impl Overlay {
         for (i, t) in self.tiles.iter().enumerate() {
             t.setFrame(frame(menu.item_rect(i, w, h)));
         }
+        self.settings_row.setFrame(frame(menu.settings_row_rect(w, h)));
+        self.settings_panel.setFrame(frame(menu.settings_panel_rect(w, h)));
+        self.settings_title.setFrame(frame(menu.settings_title_rect(w, h)));
+        for (i, (bg, name, value)) in self.settings_opts.iter().enumerate() {
+            let r = menu.settings_opt_rect(i, w, h);
+            bg.setFrame(frame(r));
+            let inner = Rect { x: r.x + r.w * 0.03, w: r.w * 0.94, ..r };
+            name.setFrame(frame(Rect { w: inner.w * 0.55, ..inner }));
+            value.setFrame(frame(Rect { x: inner.x + inner.w * 0.45, w: inner.w * 0.55, ..inner }));
+        }
+        self.settings_hint.setFrame(frame(menu.settings_hint_rect(w, h)));
         self.update(menu);
     }
 
@@ -533,6 +789,22 @@ impl Overlay {
         for (i, t) in self.tiles.iter().enumerate() {
             let c = if i == menu.sel { TILE_SEL } else { TILE };
             t.setBackgroundColor(Some(&UIColor::colorWithRed_green_blue_alpha(c[0] as f64, c[1] as f64, c[2] as f64, 1.0)));
+        }
+        let row_on = menu.sel == menu.maps.len() || menu.in_settings;
+        self.settings_row.setBackgroundColor(Some(&ui_color(if row_on { TILE_SEL } else { TILE })));
+        let open = menu.in_settings;
+        if let Some(p) = &self.panel {
+            p.setHidden(open);
+        }
+        self.settings_panel.setHidden(!open);
+        self.settings_title.setHidden(!open);
+        self.settings_hint.setHidden(!open);
+        for (i, (bg, name, value)) in self.settings_opts.iter().enumerate() {
+            bg.setHidden(!open);
+            name.setHidden(!open);
+            value.setHidden(!open);
+            bg.setBackgroundColor(Some(&ui_color(if i == menu.opt { TILE_SEL } else { TILE })));
+            value.setText(Some(&objc2_foundation::NSString::from_str(&menu.settings.text(i))));
         }
     }
 

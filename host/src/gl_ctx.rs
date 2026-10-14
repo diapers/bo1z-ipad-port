@@ -194,6 +194,10 @@ pub fn request_shot() {
     SHOT_REQUEST.store(true, Ordering::Relaxed);
 }
 
+pub fn shot_requested() -> bool {
+    SHOT_REQUEST.load(Ordering::Relaxed)
+}
+
 static SHOT_T: std::sync::Mutex<Option<(std::time::Instant, Vec<f32>)>> = std::sync::Mutex::new(None);
 
 /// Debug: BO1Z_SHOT="600,1200" saves those presented frames as BMP into the data dir;

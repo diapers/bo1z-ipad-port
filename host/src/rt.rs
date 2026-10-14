@@ -645,9 +645,6 @@ fn event_loop(store: &mut Store<Ctx>) {
             continue;
         }
         let tick_start = Instant::now();
-        if store.data().gl_current {
-            stats.frame(tick_start);
-        }
         match table_func::<i32, ()>(&mut *store, ml.func) {
             Ok(f) => {
                 settle(f.call(&mut *store, ml.arg as i32), "main loop");
@@ -657,9 +654,10 @@ fn event_loop(store: &mut Store<Ctx>) {
                 return;
             }
         }
-        // OffscreenCanvas commit: the frame presents when the worker yields.
-        if store.data().gl_current {
+        // OffscreenCanvas commit: a frame drawn in this iteration presents when the worker yields.
+        if store.data().gl_current && crate::gl::take_drew() {
             let work_end = Instant::now();
+            stats.frame(work_end);
             if let Some(dir) = rt().paths.opfs_root.parent() {
                 gl_ctx::before_present(dir);
             }
@@ -667,6 +665,7 @@ fn event_loop(store: &mut Store<Ctx>) {
                 crate::glstats::frame_errors();
             }
             gl_ctx::swap();
+            PRESENTED.fetch_add(1, Ordering::Relaxed);
             stats.split(work_end - tick_start, work_end.elapsed());
         } else if ml.mode == 1 {
             std::thread::sleep(Duration::from_millis(16));
@@ -708,6 +707,21 @@ pub fn thread_cleanup(cx: &mut Caller<'_, Ctx>, thread: u32) -> Result<()> {
     Ok(())
 }
 
+static PRESENTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// ms since `rt().started` of the last frame that took over 50 ms (the start gate).
+static LAST_HITCH_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How long frames have been presenting without a hitch (> 50 ms).
+pub fn smooth_for() -> Duration {
+    let now = rt().started.elapsed().as_millis() as u64;
+    Duration::from_millis(now.saturating_sub(LAST_HITCH_MS.load(Ordering::Relaxed)))
+}
+
+/// Frames presented so far (the frame counter).
+pub fn presented_frames() -> u64 {
+    PRESENTED.load(Ordering::Relaxed)
+}
+
 /// Logs frame pacing every 5 s: fps, average and worst frame-to-frame time, how many frames
 /// took longer than 1.5x the average (the hitches that read as choppiness), the average time
 /// in the engine's frame ("game") and in presenting it ("present": waits on the GPU), and
@@ -731,7 +745,11 @@ impl FrameStats {
 
     fn frame(&mut self, now: Instant) {
         if let Some(last) = self.last {
-            self.times.push((now - last).as_secs_f32() * 1000.0);
+            let ms = (now - last).as_secs_f32() * 1000.0;
+            self.times.push(ms);
+            if ms > 50.0 {
+                LAST_HITCH_MS.store(rt().started.elapsed().as_millis() as u64, Ordering::Relaxed);
+            }
         }
         self.last = Some(now);
         let start = *self.window_start.get_or_insert(now);

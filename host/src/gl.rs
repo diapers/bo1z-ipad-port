@@ -339,7 +339,29 @@ fn webgl_get(pname: u32, p: u32, ty: u32) {
 // Packets
 
 /// ExecuteGLPackets(start, count, data, uploads, uploadCount, bufferUploads, bufferCount, ...)
+/// Programs the engine linked whose completion it has not seen yet (the start gate waits
+/// for none: a draw with an unfinished program is skipped, i.e. missing for that frame).
+static COMPILING: Mutex<Vec<(u32, std::time::Instant)>> = Mutex::new(Vec::new());
+
+/// Programs linked in the last minute that the engine has not seen complete.
+pub fn programs_compiling() -> usize {
+    COMPILING.lock().iter().filter(|p| p.1.elapsed().as_secs() < 60).count()
+}
+
+/// GL work was submitted since the last present (see `take_drew`).
+static DREW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Did this main-loop iteration draw? With the render thread (r_smp_backend 1) its loop runs
+/// every millisecond and only some iterations render a frame; presenting the others would
+/// show an undefined back buffer (flicker), as a browser only commits a canvas drawn into.
+pub fn take_drew() -> bool {
+    DREW.swap(false, std::sync::atomic::Ordering::Relaxed)
+}
+
 fn execute_packets(start: u32, count: u32, data: u32, uploads: u32, upload_count: u32, buf_uploads: u32, buf_count: u32) {
+    if count > 0 {
+        DREW.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     let mut s = ST.lock();
     let s = s.as_mut().expect("GL used before init");
     unsafe {
@@ -683,6 +705,7 @@ pub fn register(l: &mut Linker<Ctx>) -> Result<()> {
         let native = with(|s| {
             s.programs.remove(&(id as u32));
             s.attached.remove(&(id as u32));
+            COMPILING.lock().retain(|x| x.0 != id as u32);
             if s.current_program == id as u32 {
                 s.current_program = 0;
             }
@@ -763,6 +786,11 @@ pub fn register(l: &mut Linker<Ctx>) -> Result<()> {
             (s.n(Kind::Program, prog as u32), s.attached.get(&(prog as u32)).cloned().unwrap_or_default())
         });
         unsafe { gl::LinkProgram(p) };
+        {
+            let mut c = COMPILING.lock();
+            c.retain(|x| x.0 != prog as u32);
+            c.push((prog as u32, std::time::Instant::now()));
+        }
         let stage = |ty: u32| sources.iter().find(|(t, _)| *t == ty).map(|(_, src)| src.as_str());
         if let (Some(vs), Some(fs)) = (stage(gl::VERTEX_SHADER), stage(gl::FRAGMENT_SHADER)) {
             crate::shadercache::record(vs, fs);
@@ -776,6 +804,10 @@ pub fn register(l: &mut Linker<Ctx>) -> Result<()> {
         let p = with(|s| s.n(Kind::Program, prog as u32));
         let t = std::time::Instant::now();
         unsafe { gl::GetProgramiv(p, pname as u32, mem::ptr(out as u32) as *mut i32) };
+        const COMPLETION_STATUS_KHR: u32 = 0x91B1;
+        if pname as u32 == gl::LINK_STATUS || (pname as u32 == COMPLETION_STATUS_KHR && mem::i32(out as u32) != 0) {
+            COMPILING.lock().retain(|x| x.0 != prog as u32);
+        }
         if crate::glstats::on() {
             crate::glstats::program_query(pname as u32, mem::i32(out as u32), t.elapsed());
         }

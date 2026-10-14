@@ -229,3 +229,25 @@ Build 4 runs on the iPad (Five playable). Issues from the screen recording + use
 - PC fresh-install test (Five, empty caches, shipped lists): pending draws after spawn 0
   (was 377). Remaining early hitch: ~60 MB texture streaming in the first 10 s (read MB column).
 - Build 50692cb (CI run 38337316215) -> D:\bo1z\BO1Z-all.ipa (6.76 GB) with shader lists + manifests for all 10 maps. Awaiting device test + bo1z.log.
+
+## 2026-10-13: settings screen, start gate, render thread option
+- User: graphics fixed; load-in still stuttery ("like it didn't precompile"), wants 60 fps from
+  the start, a frame counter, resolution scale, the greyed-out graphics options.
+- Greyed-out engine options need a renderer restart this build lacks; set at boot they misbehave
+  on PC: r_aaSamples 4 dim/hazy image, sm_enable 1 black screen, r_picmip no visible change.
+  r_webWorldWarm / r_shaderWarming / r_warm_* never run in the WebGL route.
+- settings.rs + menu.rs: SETTINGS row on the map select (pad/keys/tap), saved in
+  <data>/settings.json, applied at map start: FRAME COUNTER (iOS label over the game; desktop
+  window title), RESOLUTION 75-200% of the view's point size (iOS contentsScale before boot;
+  one present on the UI thread so ANGLE resizes the drawable), FRAME RATE LIMIT 30/60/unlimited
+  (com_maxfps), MULTITHREADED RENDERING (r_smp_backend 1, the site's non-Firefox route).
+- r_smp_backend 1 works: the render thread's main loop runs every 1 ms; only iterations that
+  executed GL packets present now (gl::take_drew), else undefined back buffers would flash.
+  PC: 56-57 engine fps with more jitter vs 62-63 single-threaded, so default OFF.
+- Start gate (platform.rs StartGate): after loading, the game is released behind the
+  cinematic's last frame once background builds are done, no engine program is still
+  compiling (gl::programs_compiling), file reads < 1 MB/s and frames hitch-free 1.5 s; it is
+  revealed once its start-up work (spawn, round start, ~65 MB first textures, up to 2.4 s
+  hitch on PC) has passed (reveal(), max 15 s). A press still starts at once. Status line on
+  the iOS video overlay. Background warm-up builds only device-recorded programs when the
+  map has a manifest (the engine builds the shipped list; doing both doubled the work).

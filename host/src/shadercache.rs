@@ -79,6 +79,16 @@ struct Recorder {
 
 static REC: Mutex<Option<Recorder>> = Mutex::new(None);
 
+/// Background build progress: (built, total); done when no build runs.
+static WARM_TOTAL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static WARM_BUILT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static WARM_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn warm_progress() -> Option<(usize, usize)> {
+    use std::sync::atomic::Ordering::Relaxed;
+    WARM_RUNNING.load(Relaxed).then(|| (WARM_BUILT.load(Relaxed), WARM_TOTAL.load(Relaxed)))
+}
+
 /// The map's program manifest for the engine (KB_SetProgramManifest), if shipped.
 static MANIFEST: Mutex<Option<Vec<u8>>> = Mutex::new(None);
 
@@ -98,13 +108,20 @@ pub fn start(slug: &str, game: &Path, data: &Path) {
     if let Some(m) = &manifest {
         log::info(&format!("program manifest: {} bytes", m.len()));
     }
+    let manifest_present = manifest.is_some();
     *MANIFEST.lock() = manifest;
     let own_path = data.join("shadercache").join(format!("{slug}.json"));
     let seed = List::load(&seed_path);
     let own = List::load(&own_path);
+    // The engine builds the shipped list itself from the manifest; building it here as well
+    // would compile everything twice at once. Only this device's extra programs are left.
+    let lists: Vec<&List> = if manifest_present { vec![&own] } else { vec![&seed, &own] };
     let mut all = List::default();
-    let mut known = HashSet::new();
-    for list in [&seed, &own] {
+    let mut known: HashSet<(String, String)> = seed.programs.iter().cloned().collect();
+    if !manifest_present {
+        known.clear();
+    }
+    for list in lists {
         all.shaders.extend(list.shaders.iter().map(|(k, v)| (k.clone(), v.clone())));
         for p in &list.programs {
             if known.insert(p.clone()) {
@@ -113,15 +130,21 @@ pub fn start(slug: &str, game: &Path, data: &Path) {
         }
     }
     log::info(&format!(
-        "shader warm-up: {} programs ({} shipped, {} recorded here)",
+        "shader warm-up: {} programs to build here ({} shipped, {} recorded here)",
         all.programs.len(),
         seed.programs.len(),
         own.programs.len()
     ));
+    let known: HashSet<(String, String)> = seed.programs.iter().chain(&own.programs).cloned().collect();
     *REC.lock() = Some(Recorder { path: own_path, known, own, dirty: false });
     std::thread::Builder::new().name("shader-save".into()).spawn(save_loop).ok();
     if !all.programs.is_empty() {
-        std::thread::Builder::new().name("shader-warm".into()).spawn(move || warm(all)).ok();
+        WARM_TOTAL.store(all.programs.len(), std::sync::atomic::Ordering::Relaxed);
+        WARM_RUNNING.store(true, std::sync::atomic::Ordering::Relaxed);
+        std::thread::Builder::new().name("shader-warm".into()).spawn(move || {
+            warm(all);
+            WARM_RUNNING.store(false, std::sync::atomic::Ordering::Relaxed);
+        }).ok();
     }
 }
 
@@ -241,6 +264,7 @@ fn warm(list: List) {
             if done(program_iv, p) {
                 WARM.get_or_init(Default::default).lock().push(p);
                 linked += 1;
+                WARM_BUILT.store(linked, std::sync::atomic::Ordering::Relaxed);
                 progressed = true;
                 false
             } else {
